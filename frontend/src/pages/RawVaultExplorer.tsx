@@ -1,0 +1,503 @@
+import React, { useState, useCallback } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Database, RefreshCw, Search, ChevronRight, Lock, Clock, Hash, Server, X } from 'lucide-react';
+import api from '@/api/client';
+import { Skeleton } from '@/components/ui/Skeleton';
+import { SidePanel } from '@/components/ui/SidePanel';
+import { StatusBadge } from '@/components/ui/StatusBadge';
+import type { VaultRecord } from '@/types/api';
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface VaultStats {
+  total_records: number;
+  source_systems: string[] | string | null;
+  first_ingested: string | null;
+  last_ingested: string | null;
+}
+
+interface VaultRecordsResponse {
+  records: VaultRecord[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function formatDate(iso: string | null): string {
+  if (!iso) return '—';
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+function formatDateShort(iso: string | null): string {
+  if (!iso) return '—';
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+function parseSourceSystems(value: VaultStats['source_systems']): string[] {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean).map(String);
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    return [];
+  }
+
+  const raw = value.trim();
+
+  if (raw.startsWith('[') && raw.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(Boolean).map(String);
+      }
+    } catch {
+      // Fall through to CSV parsing.
+    }
+  }
+
+  return raw
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
+function toDisplayNumber(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toLocaleString();
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed.toLocaleString();
+    }
+  }
+  return '—';
+}
+
+// ─── Stat Bar ────────────────────────────────────────────────────────────────
+
+interface StatItemProps {
+  icon: React.ReactNode;
+  label: string;
+  value: React.ReactNode;
+}
+
+const StatItem: React.FC<StatItemProps> = ({ icon, label, value }) => (
+  <div className="flex items-center gap-3 px-5 py-3 border-r border-[var(--color-border)] last:border-r-0">
+    <span className="text-[var(--color-text-muted)]">{icon}</span>
+    <div className="flex flex-col">
+      <span className="font-mono text-[9px] uppercase tracking-widest text-[var(--color-text-muted)]">{label}</span>
+      <span className="font-mono text-sm font-semibold text-[var(--color-text-primary)]">{value}</span>
+    </div>
+  </div>
+);
+
+// ─── Skeleton Rows ────────────────────────────────────────────────────────────
+
+const TableSkeletonRows: React.FC<{ count?: number }> = ({ count = 8 }) => (
+  <>
+    {Array.from({ length: count }).map((_, i) => (
+      <tr key={i} className="border-b border-[var(--color-border)]/50">
+        {[40, 80, 72, 56, 96, 28].map((w, j) => (
+          <td key={j} className="px-4 py-3">
+            <Skeleton className={`h-4 w-${w}`} style={{ width: `${w * 3}px` }} />
+          </td>
+        ))}
+      </tr>
+    ))}
+  </>
+);
+
+// ─── Detail Panel Content ─────────────────────────────────────────────────────
+
+const VaultRecordDetail: React.FC<{ record: VaultRecord }> = ({ record }) => {
+  const prettyJson = JSON.stringify(record.raw_payload, null, 2);
+
+  return (
+    <div className="space-y-6">
+      {/* Kafka Metadata */}
+      <div>
+        <h3 className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-3">
+          Kafka Metadata
+        </h3>
+        <div className="panel-border rounded-lg overflow-hidden divide-y divide-[var(--color-border)]">
+          {[
+            { label: 'Vault ID', value: `#${record.vault_id}` },
+            { label: 'Customer ID', value: record.cust_id },
+            { label: 'Source System', value: record.source_system },
+            { label: 'Kafka Offset', value: String(record.kafka_offset) },
+            { label: 'Kafka Partition', value: String(record.kafka_partition) },
+            { label: 'Ingested At', value: formatDate(record.ingested_at) },
+          ].map(({ label, value }) => (
+            <div key={label} className="flex items-center px-4 py-2.5 gap-4">
+              <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] w-32 shrink-0">
+                {label}
+              </span>
+              <span className="font-mono text-xs text-[var(--color-text-primary)] break-all">{value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Raw Payload */}
+      <div>
+        <h3 className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-3">
+          Raw Payload
+        </h3>
+        <div className="panel-border rounded-lg overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2 bg-[var(--color-surface-2)] border-b border-[var(--color-border)]">
+            <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">JSON</span>
+            <StatusBadge status="WARN">Immutable</StatusBadge>
+          </div>
+          <pre className="p-4 text-xs font-code text-[var(--color-text-secondary)] overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-[400px] overflow-y-auto">
+            {prettyJson}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+
+export default function RawVaultExplorer() {
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [offset, setOffset] = useState(0);
+  const [allRecords, setAllRecords] = useState<VaultRecord[]>([]);
+  const [selectedRecord, setSelectedRecord] = useState<VaultRecord | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const limit = 100;
+
+  // Debounce search
+  const searchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleSearchChange = (val: string) => {
+    setSearch(val);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      setDebouncedSearch(val);
+      setOffset(0);
+      setAllRecords([]);
+    }, 350);
+  };
+
+  // Stats query
+  const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useQuery<VaultStats>({
+    queryKey: ['vault-stats'],
+    queryFn: () => api.get('/vault/stats').then(r => r.data),
+  });
+
+  // Records query
+  const {
+    data: recordsData,
+    isLoading: recordsLoading,
+    isFetching,
+    refetch: refetchRecords,
+  } = useQuery<VaultRecordsResponse>({
+    queryKey: ['vault-records', debouncedSearch, offset],
+    queryFn: () =>
+      api
+        .get('/vault/records', { params: { limit, offset, search: debouncedSearch || undefined } })
+        .then(r => r.data),
+    placeholderData: (prev) => prev,
+  });
+
+  // Accumulate records for load-more
+  React.useEffect(() => {
+    if (!recordsData?.records) return;
+    if (offset === 0) {
+      setAllRecords(recordsData.records);
+    } else {
+      setAllRecords(prev => {
+        const existingIds = new Set(prev.map(r => r.vault_id));
+        const newOnes = recordsData.records.filter(r => !existingIds.has(r.vault_id));
+        return [...prev, ...newOnes];
+      });
+    }
+  }, [recordsData, offset]);
+
+  const handleRefresh = useCallback(() => {
+    setOffset(0);
+    setAllRecords([]);
+    refetchStats();
+    refetchRecords();
+  }, [refetchStats, refetchRecords]);
+
+  const handleLoadMore = () => {
+    setOffset(prev => prev + limit);
+  };
+
+  const openPanel = (record: VaultRecord) => {
+    setSelectedRecord(record);
+    setPanelOpen(true);
+  };
+
+  const closePanel = () => {
+    setPanelOpen(false);
+    setTimeout(() => setSelectedRecord(null), 300);
+  };
+
+  const sourceSystems = parseSourceSystems(stats?.source_systems ?? null);
+
+  const hasMore = recordsData ? offset + limit < recordsData.total : false;
+  const total = recordsData?.total ?? 0;
+
+  return (
+    <div className="space-y-5 animate-slide-up">
+
+      {/* ── Header ── */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+            <Database size={18} className="text-amber-500" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-display font-semibold text-[var(--color-text-primary)]">
+                Raw Vault
+              </h1>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[10px] font-mono font-bold uppercase tracking-wider">
+                <Lock size={9} />
+                Immutable
+              </span>
+            </div>
+            <p className="text-xs text-[var(--color-text-muted)] font-mono mt-0.5">
+              Immutable Event Store — Bronze Layer
+            </p>
+          </div>
+        </div>
+
+        <button
+          onClick={handleRefresh}
+          disabled={isFetching}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)]/30 transition-all text-sm font-mono"
+        >
+          <RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />
+          Refresh
+        </button>
+      </div>
+
+      {/* ── Stats Bar ── */}
+      <div className="panel-border rounded-xl overflow-hidden">
+        <div className="flex flex-wrap divide-x divide-[var(--color-border)]">
+          {statsLoading ? (
+            Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-3 px-5 py-3 flex-1">
+                <Skeleton className="w-5 h-5 rounded" />
+                <div className="space-y-1">
+                  <Skeleton className="h-2 w-16" />
+                  <Skeleton className="h-4 w-20" />
+                </div>
+              </div>
+            ))
+          ) : stats ? (
+            <>
+              <StatItem
+                icon={<Hash size={16} />}
+                label="Total Records"
+                value={toDisplayNumber(stats.total_records)}
+              />
+              <StatItem
+                icon={<Server size={16} />}
+                label="Source Systems"
+                value={
+                  <span className="flex flex-wrap gap-1 mt-0.5">
+                    {sourceSystems.map(s => (
+                      <span
+                        key={s}
+                        className="px-1.5 py-0.5 rounded text-[9px] bg-[var(--color-accent-primary)]/10 text-[var(--color-accent-primary)] border border-[var(--color-accent-primary)]/20 font-mono uppercase"
+                      >
+                        {s}
+                      </span>
+                    ))}
+                    {sourceSystems.length === 0 && <span>—</span>}
+                  </span>
+                }
+              />
+              <StatItem
+                icon={<Clock size={16} />}
+                label="First Ingested"
+                value={formatDate(stats.first_ingested)}
+              />
+              <StatItem
+                icon={<Clock size={16} />}
+                label="Last Ingested"
+                value={formatDate(stats.last_ingested)}
+              />
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {/* ── Search Bar ── */}
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1 max-w-md">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
+          <input
+            type="text"
+            value={search}
+            onChange={e => handleSearchChange(e.target.value)}
+            placeholder="Search by Customer ID, Source System…"
+            className="w-full pl-9 pr-4 py-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-sm font-mono text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent-primary)]/50 transition-colors"
+          />
+          {search && (
+            <button
+              onClick={() => handleSearchChange('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+        {total > 0 && (
+          <span className="text-xs font-mono text-[var(--color-text-muted)] whitespace-nowrap">
+            {total.toLocaleString()} records
+          </span>
+        )}
+      </div>
+
+      {/* ── Table ── */}
+      <div className="panel-border rounded-xl overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface-2)]/50">
+                {['Vault ID', 'Customer ID', 'Source System', 'Kafka Offset', 'Ingested At', ''].map(col => (
+                  <th
+                    key={col}
+                    className="px-4 py-3 font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] whitespace-nowrap"
+                  >
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {recordsLoading && offset === 0 ? (
+                <TableSkeletonRows count={8} />
+              ) : allRecords.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="py-20 text-center">
+                    <div className="flex flex-col items-center gap-3 text-[var(--color-text-muted)]">
+                      <Database size={36} className="opacity-30" />
+                      <p className="font-mono text-sm">No vault records found</p>
+                      {debouncedSearch && (
+                        <p className="text-xs">Try adjusting your search query</p>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+                <AnimatePresence initial={false}>
+                  {allRecords.map((record, idx) => (
+                    <motion.tr
+                      key={record.vault_id}
+                      initial={{ opacity: 0, y: 4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.15, delay: Math.min(idx * 0.02, 0.3) }}
+                      onClick={() => openPanel(record)}
+                      className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-accent-primary)]/4 cursor-pointer transition-colors group"
+                    >
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--color-text-muted)]">
+                        #{record.vault_id}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--color-text-primary)] font-medium">
+                        {record.cust_id}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-[var(--color-accent-primary)]/8 text-[var(--color-accent-primary)] border border-[var(--color-accent-primary)]/20">
+                          {record.source_system}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--color-text-secondary)] tabular-nums">
+                        {record.kafka_offset}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--color-text-secondary)] whitespace-nowrap">
+                        {formatDateShort(record.ingested_at)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center gap-1 text-xs font-mono text-[var(--color-text-muted)] group-hover:text-[var(--color-accent-primary)] transition-colors">
+                          View
+                          <ChevronRight size={13} />
+                        </span>
+                      </td>
+                    </motion.tr>
+                  ))}
+                </AnimatePresence>
+              )}
+
+              {/* Load-more spinner row */}
+              {isFetching && offset > 0 && (
+                <tr>
+                  <td colSpan={6} className="py-4 text-center">
+                    <span className="font-mono text-xs text-[var(--color-text-muted)] animate-pulse">
+                      Loading more…
+                    </span>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Load More */}
+        {hasMore && !isFetching && (
+          <div className="px-4 py-3 border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/30 flex items-center justify-between">
+            <span className="font-mono text-xs text-[var(--color-text-muted)]">
+              Showing {allRecords.length.toLocaleString()} of {total.toLocaleString()}
+            </span>
+            <button
+              onClick={handleLoadMore}
+              className="px-4 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-xs font-mono text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)]/30 transition-all"
+            >
+              Load More
+            </button>
+          </div>
+        )}
+
+        {!hasMore && allRecords.length > 0 && !isFetching && (
+          <div className="px-4 py-3 border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/30">
+            <span className="font-mono text-xs text-[var(--color-text-muted)]">
+              All {total.toLocaleString()} records loaded
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Detail Side Panel ── */}
+      <SidePanel
+        isOpen={panelOpen}
+        onClose={closePanel}
+        title={
+          <div className="flex items-center gap-2">
+            <Lock size={15} className="text-amber-500" />
+            <span>Vault Record #{selectedRecord?.vault_id}</span>
+          </div>
+        }
+      >
+        {selectedRecord && <VaultRecordDetail record={selectedRecord} />}
+      </SidePanel>
+    </div>
+  );
+}
