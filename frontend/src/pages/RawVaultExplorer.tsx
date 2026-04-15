@@ -1,21 +1,13 @@
 import React, { useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Database, RefreshCw, Search, ChevronRight, Lock, Clock, Hash, Server, X } from 'lucide-react';
+import { Database, RefreshCw, Search, ChevronRight, Lock, X } from 'lucide-react';
 import api from '@/api/client';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { SidePanel } from '@/components/ui/SidePanel';
 import { StatusBadge } from '@/components/ui/StatusBadge';
+import { LayerKPIStats } from '@/components/ui/LayerKPIStats';
 import type { VaultRecord } from '@/types/api';
-
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-interface VaultStats {
-  total_records: number;
-  source_systems: string[] | string | null;
-  first_ingested: string | null;
-  last_ingested: string | null;
-}
 
 interface VaultRecordsResponse {
   records: VaultRecord[];
@@ -54,64 +46,6 @@ function formatDateShort(iso: string | null): string {
     return iso;
   }
 }
-
-function parseSourceSystems(value: VaultStats['source_systems']): string[] {
-  if (Array.isArray(value)) {
-    return value.filter(Boolean).map(String);
-  }
-  if (typeof value !== 'string' || !value.trim()) {
-    return [];
-  }
-
-  const raw = value.trim();
-
-  if (raw.startsWith('[') && raw.endsWith(']')) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.filter(Boolean).map(String);
-      }
-    } catch {
-      // Fall through to CSV parsing.
-    }
-  }
-
-  return raw
-    .split(',')
-    .map(part => part.trim())
-    .filter(Boolean);
-}
-
-function toDisplayNumber(value: unknown): string {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value.toLocaleString();
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed.toLocaleString();
-    }
-  }
-  return '—';
-}
-
-// ─── Stat Bar ────────────────────────────────────────────────────────────────
-
-interface StatItemProps {
-  icon: React.ReactNode;
-  label: string;
-  value: React.ReactNode;
-}
-
-const StatItem: React.FC<StatItemProps> = ({ icon, label, value }) => (
-  <div className="flex items-center gap-3 px-5 py-3 border-r border-[var(--color-border)] last:border-r-0">
-    <span className="text-[var(--color-text-muted)]">{icon}</span>
-    <div className="flex flex-col">
-      <span className="font-mono text-[9px] uppercase tracking-widest text-[var(--color-text-muted)]">{label}</span>
-      <span className="font-mono text-sm font-semibold text-[var(--color-text-primary)]">{value}</span>
-    </div>
-  </div>
-);
 
 // ─── Skeleton Rows ────────────────────────────────────────────────────────────
 
@@ -202,12 +136,6 @@ export default function RawVaultExplorer() {
     }, 350);
   };
 
-  // Stats query
-  const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useQuery<VaultStats>({
-    queryKey: ['vault-stats'],
-    queryFn: () => api.get('/vault/stats').then(r => r.data),
-  });
-
   // Records query
   const {
     data: recordsData,
@@ -240,9 +168,8 @@ export default function RawVaultExplorer() {
   const handleRefresh = useCallback(() => {
     setOffset(0);
     setAllRecords([]);
-    refetchStats();
     refetchRecords();
-  }, [refetchStats, refetchRecords]);
+  }, [refetchRecords]);
 
   const handleLoadMore = () => {
     setOffset(prev => prev + limit);
@@ -257,8 +184,6 @@ export default function RawVaultExplorer() {
     setPanelOpen(false);
     setTimeout(() => setSelectedRecord(null), 300);
   };
-
-  const sourceSystems = parseSourceSystems(stats?.source_systems ?? null);
 
   const hasMore = recordsData ? offset + limit < recordsData.total : false;
   const total = recordsData?.total ?? 0;
@@ -298,57 +223,8 @@ export default function RawVaultExplorer() {
         </button>
       </div>
 
-      {/* ── Stats Bar ── */}
-      <div className="panel-border rounded-xl overflow-hidden">
-        <div className="flex flex-wrap divide-x divide-[var(--color-border)]">
-          {statsLoading ? (
-            Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-3 px-5 py-3 flex-1">
-                <Skeleton className="w-5 h-5 rounded" />
-                <div className="space-y-1">
-                  <Skeleton className="h-2 w-16" />
-                  <Skeleton className="h-4 w-20" />
-                </div>
-              </div>
-            ))
-          ) : stats ? (
-            <>
-              <StatItem
-                icon={<Hash size={16} />}
-                label="Total Records"
-                value={toDisplayNumber(stats.total_records)}
-              />
-              <StatItem
-                icon={<Server size={16} />}
-                label="Source Systems"
-                value={
-                  <span className="flex flex-wrap gap-1 mt-0.5">
-                    {sourceSystems.map(s => (
-                      <span
-                        key={s}
-                        className="px-1.5 py-0.5 rounded text-[9px] bg-[var(--color-accent-primary)]/10 text-[var(--color-accent-primary)] border border-[var(--color-accent-primary)]/20 font-mono uppercase"
-                      >
-                        {s}
-                      </span>
-                    ))}
-                    {sourceSystems.length === 0 && <span>—</span>}
-                  </span>
-                }
-              />
-              <StatItem
-                icon={<Clock size={16} />}
-                label="First Ingested"
-                value={formatDate(stats.first_ingested)}
-              />
-              <StatItem
-                icon={<Clock size={16} />}
-                label="Last Ingested"
-                value={formatDate(stats.last_ingested)}
-              />
-            </>
-          ) : null}
-        </div>
-      </div>
+      {/* ── Layer Quality KPIs ── */}
+      <LayerKPIStats layerName="Raw Vault" layerId={1} />
 
       {/* ── Search Bar ── */}
       <div className="flex items-center gap-3">

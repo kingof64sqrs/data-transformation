@@ -7,7 +7,7 @@ import path from 'path'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    allowedHosts: ['sealed-promotions-neighbor-retain.trycloudflare.com'],
+    allowedHosts: ['julie-nightlife-bibliographic-additionally.trycloudflare.com'],
   },
   resolve: {
     alias: {

@@ -17,6 +17,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { SidePanel } from '@/components/ui/SidePanel';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { ConfidenceBar } from '@/components/ui/ConfidenceBar';
+import { LayerKPIStats } from '@/components/ui/LayerKPIStats';
 import type { CanonicalRecord, CanonicalStats } from '@/types/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -64,6 +65,12 @@ function completenessLabel(score: number): 'SUCCESS' | 'WARN' | 'DANGER' {
   if (score > 80) return 'SUCCESS';
   if (score >= 50) return 'WARN';
   return 'DANGER';
+}
+
+function toPercent(score: number | null | undefined): number {
+  const value = Number(score ?? 0);
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value <= 1 ? value * 100 : value);
 }
 
 // ─── Stat Tile ────────────────────────────────────────────────────────────────
@@ -124,7 +131,7 @@ const TableSkeletonRows: React.FC<{ count?: number }> = ({ count = 8 }) => (
 // ─── Detail Panel ─────────────────────────────────────────────────────────────
 
 const CanonicalRecordDetail: React.FC<{ record: CanonicalRecord }> = ({ record }) => {
-  const score = Math.round(record.completeness_score * 100);
+  const score = toPercent(record.completeness_score);
   const fields = [
     { label: 'Canonical ID', value: String(record.canonical_id), note: '' },
     { label: 'Customer ID', value: record.cust_id, note: '' },
@@ -354,6 +361,9 @@ export default function CanonicalExplorer() {
         </div>
       </div>
 
+      {/* ── Layer Quality KPIs ── */}
+        <LayerKPIStats layerName="Canonical Layer" layerId={2} />
+
       {/* ── Quality Issues Banner ── */}
       <AnimatePresence>
         {qualityIssues && qualityIssues.total_issues > 0 && (
@@ -483,7 +493,7 @@ export default function CanonicalExplorer() {
               ) : (
                 <AnimatePresence initial={false}>
                   {allRecords.map((record, idx) => {
-                    const score = Math.round((record.completeness_score ?? 0) * 100);
+                    const score = toPercent(record.completeness_score);
                     return (
                       <motion.tr
                         key={record.canonical_id}

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import * as d3 from 'd3';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search,
@@ -131,11 +132,11 @@ function TimelineEntry({
   const formatted = isNaN(date.getTime())
     ? entry.ts
     : date.toLocaleString(undefined, {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
 
   return (
     <motion.div
@@ -199,9 +200,145 @@ export default function DataLineage() {
   const [panelStage, setPanelStage] = useState<string | null>(null);
   const [activeStage, setActiveStage] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [viewMode, setViewMode] = useState<'static' | 'dynamic'>('dynamic');
 
   const searchRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // ── Render D3 Chart ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!containerRef.current || !lineage || viewMode === 'static') return;
+    const { clientWidth, clientHeight } = containerRef.current;
+
+    // Clear previous
+    d3.select(containerRef.current).select('svg').remove();
+
+    const margin = { top: 60, right: 120, bottom: 60, left: 120 };
+    const width = Math.max(clientWidth, 800) - margin.left - margin.right;
+    const height = Math.max(clientHeight, 500) - margin.top - margin.bottom;
+
+    const matchDecisionNodes = (lineage.matches || []).map((m: any) => ({
+      name: m.partner_name || m.partner_cust_id || m.match_id,
+      type: m.decision === 'auto_merged' ? 'status_success' : m.decision === 'decided_separate' ? 'status_danger' : 'status_warn',
+      subtitle: `Score: ${Math.round(m.composite_score || 0)}%`,
+      children: m.decision === 'auto_merged' ? [{ name: 'Master Record', type: 'gold', subtitle: 'Resolved' }] : []
+    }));
+
+    const treeData = {
+      name: 'Source DB',
+      type: 'source',
+      subtitle: lineage.source?.cust_id || 'System Input',
+      children: [{
+        name: 'Raw Vault',
+        type: 'layer',
+        subtitle: 'Immutable record',
+        children: [{
+          name: 'Canonical',
+          type: 'layer',
+          subtitle: 'Normalized & Cleaned',
+          children: [
+            {
+              name: 'Identity Matching',
+              type: 'decision',
+              subtitle: `${(lineage.matches || []).length} branches`,
+              children: [
+                { name: 'Self-Resolution', type: 'decision', children: [{ name: 'Master Record', type: 'gold', subtitle: 'Primary Profile' }] },
+                ...matchDecisionNodes
+              ]
+            }
+          ]
+        }]
+      }]
+    };
+
+    const root = d3.hierarchy(treeData);
+    const treeLayout = d3.tree().size([height, width]);
+    treeLayout(root);
+
+    const svg = d3.select(containerRef.current)
+      .append('svg')
+      .attr('width', width + margin.left + margin.right)
+      .attr('height', height + margin.top + margin.bottom)
+      .append('g')
+      .attr('transform', `translate(${margin.left},${margin.top}) scale(${zoom})`);
+
+    // Draw links
+    svg.selectAll('.link')
+      .data(root.links())
+      .enter()
+      .append('path')
+      .attr('class', 'link')
+      .attr('fill', 'none')
+      .attr('stroke', 'var(--color-border)')
+      .attr('stroke-width', 2)
+      .attr('d', d3.linkHorizontal()
+        .x((d: any) => d.y)
+        .y((d: any) => d.x) as any
+      )
+      .style('opacity', 0)
+      .transition()
+      .duration(1000)
+      .style('opacity', 1);
+
+    // Draw particles
+    const pathNodes = svg.selectAll('.link').nodes();
+    pathNodes.forEach((path: any) => {
+      svg.append('circle')
+        .attr('r', 3)
+        .attr('fill', 'var(--color-accent-primary)')
+        .attr('filter', 'drop-shadow(0 0 4px var(--color-accent-primary))')
+        .append('animateMotion')
+        .attr('dur', `${Math.random() * 2 + 2}s`)
+        .attr('repeatCount', 'indefinite')
+        .attr('path', path.getAttribute('d'));
+    });
+
+    const node = svg.selectAll('.node')
+      .data(root.descendants())
+      .enter()
+      .append('g')
+      .attr('class', 'node')
+      .attr('transform', (d: any) => `translate(${d.y},${d.x})`)
+      .style('opacity', 0);
+
+    node.transition().duration(800).delay((d, i) => i * 100).style('opacity', 1);
+
+    node.append('circle')
+      .attr('r', (d: any) => d.data.type === 'gold' ? 10 : 8)
+      .attr('fill', (d: any) => {
+        if (d.data.type === 'gold') return 'var(--color-success)';
+        if (d.data.type === 'source') return 'var(--color-text-muted)';
+        if (d.data.type === 'decision') return 'var(--color-accent-secondary)';
+        if (d.data.type === 'status_success') return 'var(--color-success)';
+        if (d.data.type === 'status_danger') return 'var(--color-danger)';
+        if (d.data.type === 'status_warn') return 'var(--color-warning)';
+        return 'var(--color-accent-primary)';
+      })
+      .attr('stroke', 'var(--color-background)')
+      .attr('stroke-width', 3)
+      .style('cursor', 'pointer');
+
+    node.append('text')
+      .attr('dy', -20)
+      .attr('x', 0)
+      .style('text-anchor', 'middle')
+      .text((d: any) => d.data.name)
+      .attr('fill', 'var(--color-text-primary)')
+      .attr('font-family', 'var(--font-mono)')
+      .attr('font-size', '12px')
+      .attr('font-weight', (d: any) => d.data.type === 'gold' ? 'bold' : 'normal');
+
+    node.append('text')
+      .attr('dy', 24)
+      .attr('x', 0)
+      .style('text-anchor', 'middle')
+      .text((d: any) => d.data.subtitle || '')
+      .attr('fill', 'var(--color-text-muted)')
+      .attr('font-family', 'var(--font-sans)')
+      .attr('font-size', '10px');
+
+  }, [lineage, zoom, viewMode]);
 
   // ── Suggestions ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -262,18 +399,18 @@ export default function DataLineage() {
   // ── Build stage data from lineage ─────────────────────────────────────────
   const stages = lineage
     ? [
-        { key: 'source', data: lineage.source },
-        { key: 'vault', data: lineage.vault },
-        { key: 'canonical', data: lineage.canonical },
-        {
-          key: 'identity',
-          data:
-            lineage.matches && lineage.matches.length > 0
-              ? { matches: lineage.matches.length, top: lineage.matches[0] }
-              : null,
-        },
-        { key: 'master', data: lineage.master as unknown as Record<string, unknown> | null },
-      ]
+      { key: 'source', data: lineage.source },
+      { key: 'vault', data: lineage.vault },
+      { key: 'canonical', data: lineage.canonical },
+      {
+        key: 'identity',
+        data:
+          lineage.matches && lineage.matches.length > 0
+            ? { matches: lineage.matches.length, top: lineage.matches[0] }
+            : null,
+      },
+      { key: 'master', data: lineage.master as unknown as Record<string, unknown> | null },
+    ]
     : [];
 
   const getPanelData = (): Record<string, unknown> | null => {
@@ -452,6 +589,10 @@ export default function DataLineage() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <div className="flex items-center bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-md p-0.5 mr-2">
+                  <button onClick={() => setViewMode('static')} className={`px-2.5 py-1 text-[11px] font-mono tracking-wider uppercase rounded-sm ${viewMode === 'static' ? 'bg-[var(--color-surface-1)] text-[var(--color-text-primary)] shadow-sm' : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'}`}>Static</button>
+                  <button onClick={() => setViewMode('dynamic')} className={`px-2.5 py-1 text-[11px] font-mono tracking-wider uppercase rounded-sm ${viewMode === 'dynamic' ? 'bg-[var(--color-surface-1)] text-[var(--color-text-primary)] shadow-sm' : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'}`}>Animated</button>
+                </div>
                 <button
                   onClick={() => setZoom((z) => Math.max(0.75, Number((z - 0.1).toFixed(2))))}
                   className="h-8 w-8 rounded-md border border-[var(--color-border)] hover:border-[var(--color-accent-primary)] flex items-center justify-center text-[var(--color-text-secondary)]"
@@ -472,126 +613,133 @@ export default function DataLineage() {
               </div>
             </div>
 
-            <div className="relative min-h-[520px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)]/20 overflow-auto">
+            <div
+              className={cn("relative min-h-[520px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)]/20 overflow-auto", viewMode === 'dynamic' && "cursor-grab active:cursor-grabbing")}
+            >
               <div className="relative w-full h-full min-w-[1100px] min-h-[520px]" style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}>
-                <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                  {[
-                    ['source', 'vault'],
-                    ['vault', 'canonical'],
-                    ['canonical', 'identity'],
-                    ['canonical', 'master'],
-                  ].map(([from, to]) => {
-                    const coords: Record<string, [number, number]> = {
-                      source: [12, 50],
-                      vault: [30, 50],
-                      canonical: [48, 50],
-                      identity: [68, 30],
-                      master: [68, 70],
-                    };
-                    const [x1, y1] = coords[from];
-                    const [x2, y2] = coords[to];
-                    return (
-                      <line
-                        key={`${from}-${to}`}
-                        x1={x1}
-                        y1={y1}
-                        x2={x2}
-                        y2={y2}
-                        stroke="var(--color-border)"
-                        strokeWidth="0.42"
-                        strokeDasharray="1.1 0.8"
-                      />
-                    );
-                  })}
+                {viewMode === 'dynamic' ? (
+                  <div ref={containerRef} className="absolute inset-0 w-full h-full" />
+                ) : (
+                  <>
+                    <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+                      {[
+                        ['source', 'vault'],
+                        ['vault', 'canonical'],
+                        ['canonical', 'identity'],
+                        ['canonical', 'master'],
+                      ].map(([from, to]) => {
+                        const coords: Record<string, [number, number]> = {
+                          source: [12, 50],
+                          vault: [30, 50],
+                          canonical: [48, 50],
+                          identity: [68, 30],
+                          master: [68, 70],
+                        };
+                        const [x1, y1] = coords[from];
+                        const [x2, y2] = coords[to];
+                        return (
+                          <line
+                            key={`${from}-${to}`}
+                            x1={x1}
+                            y1={y1}
+                            x2={x2}
+                            y2={y2}
+                            stroke="var(--color-border)"
+                            strokeWidth="0.42"
+                            strokeDasharray="1.1 0.8"
+                          />
+                        );
+                      })}
 
-                  {lineage.matches?.slice(0, 5).map((_, idx) => {
-                    const py = 16 + idx * 14;
-                    return (
-                      <line
-                        key={`identity-partner-${idx}`}
-                        x1={68}
-                        y1={30}
-                        x2={88}
-                        y2={py}
-                        stroke="#EC4899"
-                        strokeWidth="0.34"
-                        strokeOpacity="0.55"
-                      />
-                    );
-                  })}
-                </svg>
+                      {lineage.matches?.slice(0, 5).map((_, idx) => {
+                        const py = 16 + idx * 14;
+                        return (
+                          <line
+                            key={`identity-partner-${idx}`}
+                            x1={68}
+                            y1={30}
+                            x2={88}
+                            y2={py}
+                            stroke="#EC4899"
+                            strokeWidth="0.34"
+                            strokeOpacity="0.55"
+                          />
+                        );
+                      })}
+                    </svg>
 
-                {stages.map((stage) => {
-                  const coords: Record<string, [number, number]> = {
-                    source: [12, 50],
-                    vault: [30, 50],
-                    canonical: [48, 50],
-                    identity: [68, 30],
-                    master: [68, 70],
-                  };
-                  const [x, y] = coords[stage.key] ?? [50, 50];
-                  const meta = STAGE_META[stage.key] ?? {
-                    label: stage.key,
-                    icon: '◉',
-                    color: 'var(--color-text-muted)',
-                  };
+                    {stages.map((stage) => {
+                      const coords: Record<string, [number, number]> = {
+                        source: [12, 50],
+                        vault: [30, 50],
+                        canonical: [48, 50],
+                        identity: [68, 30],
+                        master: [68, 70],
+                      };
+                      const [x, y] = coords[stage.key] ?? [50, 50];
+                      const meta = STAGE_META[stage.key] ?? {
+                        label: stage.key,
+                        icon: '◉',
+                        color: 'var(--color-text-muted)',
+                      };
 
-                  const subtitle = stage.data
-                    ? String(
-                        (stage.data as Record<string, unknown>)?.full_name ??
+                      const subtitle = stage.data
+                        ? String(
+                          (stage.data as Record<string, unknown>)?.full_name ??
                           (stage.data as Record<string, unknown>)?.cust_id ??
                           (stage.data as Record<string, unknown>)?.master_id ??
                           ((stage.key === 'identity' && lineage.matches?.length)
                             ? `${lineage.matches.length} linked matches`
                             : 'Available')
-                      )
-                    : undefined;
+                        )
+                        : undefined;
 
-                  return (
-                    <MindNode
-                      key={stage.key}
-                      id={stage.key}
-                      x={x}
-                      y={y}
-                      title={meta.label}
-                      subtitle={subtitle}
-                      icon={meta.icon}
-                      color={meta.color}
-                      active={activeStage === stage.key}
-                      disabled={!stage.data}
-                      onClick={() => {
-                        if (stage.data) {
-                          setPanelStage(stage.key);
-                          setActiveStage(stage.key);
-                        }
-                      }}
-                    />
-                  );
-                })}
+                      return (
+                        <MindNode
+                          key={stage.key}
+                          id={stage.key}
+                          x={x}
+                          y={y}
+                          title={meta.label}
+                          subtitle={subtitle}
+                          icon={meta.icon}
+                          color={meta.color}
+                          active={activeStage === stage.key}
+                          disabled={!stage.data}
+                          onClick={() => {
+                            if (stage.data) {
+                              setPanelStage(stage.key);
+                              setActiveStage(stage.key);
+                            }
+                          }}
+                        />
+                      );
+                    })}
 
-                {lineage.matches?.slice(0, 5).map((m, idx) => (
-                  <MindNode
-                    key={`partner-${m.match_id}`}
-                    id={`partner-${m.match_id}`}
-                    x={88}
-                    y={16 + idx * 14}
-                    title="Linked Identity"
-                    subtitle={m.partner_name || m.partner_cust_id}
-                    icon="◌"
-                    color="#EC4899"
-                    onClick={() => {
-                      setPanelStage('identity');
-                      setActiveStage('identity');
-                    }}
-                  />
-                ))}
+                    {lineage.matches?.slice(0, 5).map((m, idx) => (
+                      <MindNode
+                        key={`partner-${m.match_id}`}
+                        id={`partner-${m.match_id}`}
+                        x={88}
+                        y={16 + idx * 14}
+                        title="Linked Identity"
+                        subtitle={m.partner_name || m.partner_cust_id}
+                        icon="◌"
+                        color="#EC4899"
+                        onClick={() => {
+                          setPanelStage('identity');
+                          setActiveStage('identity');
+                        }}
+                      />
+                    ))}
+                  </>
+                )}
               </div>
 
-              <div className="absolute left-4 bottom-4 flex items-center gap-4 text-[10px] font-mono text-[var(--color-text-muted)] bg-[var(--color-surface-1)]/80 border border-[var(--color-border)] rounded-md px-3 py-2">
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-accent-primary)]" /> Source</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-warning)]" /> Vault</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-accent-secondary)]" /> Canonical</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#EC4899]" /> Identity</span>
+              <div className="absolute left-4 bottom-4 flex items-center gap-4 text-[10px] font-mono text-[var(--color-text-muted)] bg-[var(--color-surface-1)]/80 border border-[var(--color-border)] rounded-md px-3 py-2 z-10 pointer-events-none">
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-text-muted)]" /> Source</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-accent-primary)]" /> Layer</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-accent-secondary)]" /> Processing</span>
                 <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[var(--color-success)]" /> Master</span>
               </div>
             </div>
@@ -623,8 +771,8 @@ export default function DataLineage() {
                         m.decision === 'auto_merged'
                           ? 'SUCCESS'
                           : m.decision === 'decided_separate'
-                          ? 'DANGER'
-                          : 'WARN'
+                            ? 'DANGER'
+                            : 'WARN'
                       }
                     >
                       {m.decision ?? 'pending'}

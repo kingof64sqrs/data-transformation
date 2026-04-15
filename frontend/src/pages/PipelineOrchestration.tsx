@@ -258,7 +258,7 @@ const STAGE_IDS: StageId[] = ['ingest', 'vault', 'canonical', 'identity', 'decis
 
 export default function PipelineOrchestration() {
   // Config state
-  const [resetAll, setResetAll] = useState(false);
+  const [resetAll, setResetAll] = useState(true);
   const [skipKafka, setSkipKafka] = useState(false);
   const [recordLimit, setRecordLimit] = useState<string>('');
   const [enabledStages, setEnabledStages] = useState<Record<StageId, boolean>>(
@@ -361,7 +361,7 @@ export default function PipelineOrchestration() {
         stages: STAGE_IDS.filter(id => enabledStages[id]),
       };
       if (recordLimit !== '') {
-        payload.record_limit = parseInt(recordLimit, 10);
+        payload.produce_limit = parseInt(recordLimit, 10);
       }
 
       const res = await api.post<PipelineRunResult>('/pipeline/run', payload, { timeout: 300_000 });

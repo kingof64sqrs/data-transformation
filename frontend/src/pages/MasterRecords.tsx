@@ -14,6 +14,7 @@ import api from '@/api/client';
 import { SidePanel } from '@/components/ui/SidePanel';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { StatusBadge } from '@/components/ui/StatusBadge';
+import { LayerKPIStats } from '@/components/ui/LayerKPIStats';
 import { useToast } from '@/components/ui/Toast';
 import type { MasterRecord } from '@/types/api';
 import { cn } from '@/lib/utils';
@@ -23,6 +24,9 @@ interface MasterStats {
   avg_confidence: number;
   avg_merged_count: number;
   multi_source_pct: number;
+  singleton_count?: number;
+  total?: number;
+  merged_count?: number;
 }
 
 interface MasterApiResponse {
@@ -30,6 +34,26 @@ interface MasterApiResponse {
   total: number;
   limit: number;
   offset: number;
+}
+
+interface CorrectionExample {
+  cust_id: string;
+  raw: {
+    full_name: string;
+    email: string;
+    phone: string;
+    city: string;
+    state: string;
+  };
+  master: {
+    master_id: string;
+    full_name: string;
+    email: string;
+    phone: string;
+    city: string;
+    state: string;
+  };
+  corrected_fields: string[];
 }
 
 const LIMIT = 100;
@@ -257,6 +281,7 @@ export default function MasterRecords() {
   const [offset, setOffset] = useState(0);
   const [selectedRecord, setSelectedRecord] = useState<MasterRecord | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [corrections, setCorrections] = useState<CorrectionExample[]>([]);
 
   const searchDebounce = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -289,8 +314,18 @@ export default function MasterRecords() {
     }
   }, []);
 
+  const fetchCorrectionsPreview = useCallback(async () => {
+    try {
+      const res = await api.get('/master/corrections-preview', { params: { limit: 2 } });
+      setCorrections(res.data?.examples ?? []);
+    } catch {
+      setCorrections([]);
+    }
+  }, []);
+
   useEffect(() => {
     fetchStats();
+    fetchCorrectionsPreview();
     fetchRecords('', 0);
   }, []);
 
@@ -355,21 +390,19 @@ export default function MasterRecords() {
         </button>
       </div>
 
+
       {/* ── Stats row ───────────────────────────────────────────────────── */}
       {stats ? (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <StatCard label="Total Records" value={stats.total_records?.toLocaleString() ?? '—'} />
+          <StatCard label="Total Records" value={(stats.total_records ?? stats.total ?? 0).toLocaleString()} />
+          <StatCard label="Avg Confidence" value={`${(stats.avg_confidence ?? 0).toFixed(1)}%`} />
           <StatCard
-            label="Avg Confidence"
-            value={`${Math.round((stats.avg_confidence ?? 0) * 100)}%`}
-          />
-          <StatCard
-            label="Avg Merged Count"
+            label="Avg Source Count"
             value={(stats.avg_merged_count ?? 0).toFixed(1)}
           />
           <StatCard
             label="Multi-Source %"
-            value={`${Math.round(stats.multi_source_pct ?? 0)}%`}
+            value={`${(stats.multi_source_pct ?? 0).toFixed(1)}%`}
           />
         </div>
       ) : (
@@ -379,6 +412,9 @@ export default function MasterRecords() {
           ))}
         </div>
       )}
+
+      {/* ── Layer Quality KPIs ── */}
+      <LayerKPIStats layerName="Master Records" layerId={4} />
 
       {/* ── Search & filters ─────────────────────────────────────────────── */}
       <div className="flex items-center gap-3">

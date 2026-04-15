@@ -5,6 +5,7 @@ import api from '@/api/client';
 import type { MatchRecord, IdentityStats } from '@/types/api';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { SidePanel } from '@/components/ui/SidePanel';
+import { LayerKPIStats } from '@/components/ui/LayerKPIStats';
 import SignalBreakdown from '@/components/ui/SignalBreakdown';
 import FieldDiff from '@/components/ui/FieldDiff';
 
@@ -79,6 +80,9 @@ export default function IdentityGraph() {
           </div>
         )}
       </div>
+
+      {/* Layer Quality KPIs */}
+      <LayerKPIStats layerName="Identity Graph" layerId={3} />
 
       {/* Tabs + View Toggle */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
