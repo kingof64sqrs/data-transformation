@@ -399,6 +399,8 @@ export default function MasterRecords() {
   const availableSystems = Array.from(
     new Set(records.flatMap(r => r.source_systems || []))
   ).sort();
+
+  return (
     <div className="flex flex-col gap-6 animate-slide-up">
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
@@ -411,18 +413,33 @@ export default function MasterRecords() {
             Unified Customer Truth
           </p>
         </div>
-        <button
-          onClick={exportCSV}
-          disabled={exporting}
-          className={cn(
-            'flex items-center gap-2 px-4 py-2.5 rounded-xl panel-border font-mono text-sm font-bold uppercase tracking-wider transition-all',
-            'text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)]',
-            'disabled:opacity-40 disabled:cursor-not-allowed'
-          )}
-        >
-          {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-          Export CSV
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={loadToDatabase}
+            disabled={loading_db || records.length === 0}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2.5 rounded-xl panel-border font-mono text-sm font-bold uppercase tracking-wider transition-all',
+              'text-[var(--color-accent-secondary)] hover:border-[var(--color-accent-secondary)] border-[var(--color-accent-secondary)]/30',
+              'disabled:opacity-40 disabled:cursor-not-allowed'
+            )}
+            title={records.length === 0 ? 'No records to load' : 'Load filtered records to database'}
+          >
+            {loading_db ? <Loader2 size={14} className="animate-spin" /> : <Database size={14} />}
+            Load to DB
+          </button>
+          <button
+            onClick={exportCSV}
+            disabled={exporting}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2.5 rounded-xl panel-border font-mono text-sm font-bold uppercase tracking-wider transition-all',
+              'text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)]',
+              'disabled:opacity-40 disabled:cursor-not-allowed'
+            )}
+          >
+            {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+            Export CSV
+          </button>
+        </div>
       </div>
 
 
@@ -530,27 +547,83 @@ export default function MasterRecords() {
       </div>
 
       {/* ── Search & filters ─────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3">
-        <div className="flex-1 relative">
-          <Search
-            size={15}
-            className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] pointer-events-none"
-          />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by name, email, or ID…"
-            className="w-full pl-10 pr-4 py-2.5 rounded-xl panel-border bg-transparent font-mono text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent-primary)] transition-colors"
-          />
+      <div className="space-y-3">
+        {/* Table Source Filters */}
+        {availableSystems.length > 0 && (
+          <div className="panel-border rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">
+                📊 Filter by Source Table
+              </p>
+              {selectedSystems.size > 0 && (
+                <button
+                  onClick={() => setSelectedSystems(new Set())}
+                  className="text-xs font-mono text-[var(--color-accent-primary)] hover:underline"
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {availableSystems.map((system) => (
+                <label
+                  key={system}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[var(--color-border)] cursor-pointer hover:border-[var(--color-accent-primary)] transition-colors"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedSystems.has(system)}
+                    onChange={(e) => {
+                      const newSystems = new Set(selectedSystems);
+                      if (e.target.checked) {
+                        newSystems.add(system);
+                      } else {
+                        newSystems.delete(system);
+                      }
+                      setSelectedSystems(newSystems);
+                    }}
+                    className="w-4 h-4 rounded accent-[var(--color-accent-primary)]"
+                  />
+                  <span className="text-sm font-mono text-[var(--color-text-secondary)]">
+                    {system}
+                  </span>
+                  <span className="text-xs text-[var(--color-text-muted)]">
+                    ({records.filter(r => r.source_systems?.includes(system)).length})
+                  </span>
+                </label>
+              ))}
+            </div>
+            {selectedSystems.size > 0 && (
+              <div className="text-xs font-mono text-[var(--color-accent-secondary)]">
+                📌 Showing {records.filter(r => r.source_systems?.some(sys => selectedSystems.has(sys))).length} of {records.length} records
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Search */}
+        <div className="flex items-center gap-3">
+          <div className="flex-1 relative">
+            <Search
+              size={15}
+              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] pointer-events-none"
+            />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name, email, or ID…"
+              className="w-full pl-10 pr-4 py-2.5 rounded-xl panel-border bg-transparent font-mono text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent-primary)] transition-colors"
+            />
+          </div>
+          <button
+            onClick={() => fetchRecords(search, offset)}
+            className="p-2.5 rounded-xl panel-border text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)] transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw size={15} />
+          </button>
         </div>
-        <button
-          onClick={() => fetchRecords(search, offset)}
-          className="p-2.5 rounded-xl panel-border text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)] transition-colors"
-          title="Refresh"
-        >
-          <RefreshCw size={15} />
-        </button>
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────────── */}
