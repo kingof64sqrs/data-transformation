@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=IBM+Plex+Mono:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
 @import "tailwindcss";
 
 @theme {
@@ -19,7 +19,7 @@
   --color-text-secondary: var(--text-secondary);
   --color-text-muted: var(--text-muted);
 
-  --font-sans: "DM Sans", sans-serif;
+  --font-sans: "Manrope", sans-serif;
   --font-mono: "IBM Plex Mono", monospace;
   --font-code: "JetBrains Mono", monospace;
 }
@@ -94,7 +94,7 @@
 
 @layer utilities {
   .font-display {
-    font-family: var(--font-mono);
+    font-family: "Space Grotesk", var(--font-sans), sans-serif;
   }
 
   .font-code {

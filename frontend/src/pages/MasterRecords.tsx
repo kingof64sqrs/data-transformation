@@ -34,6 +34,10 @@ interface MasterApiResponse {
   total: number;
   limit: number;
   offset: number;
+  source_counts?: Array<{
+    source_system: string;
+    count: number;
+  }>;
 }
 
 const LIMIT = 100;
@@ -265,19 +269,26 @@ export default function MasterRecords() {
   const [applyingKey, setApplyingKey] = useState<string | null>(null);
   const [selectedSystems, setSelectedSystems] = useState<Set<string>>(new Set());
   const [loading_db, setLoadingDb] = useState(false);
+  const [sourceCounts, setSourceCounts] = useState<Array<{ source_system: string; count: number }>>([]);
 
   const searchDebounce = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const fetchRecords = useCallback(
-    async (q: string, off: number) => {
+    async (q: string, off: number, systems: string[] = []) => {
       setLoading(true);
       try {
         const res = await api.get<MasterApiResponse>('/master/records', {
-          params: { limit: LIMIT, offset: off, ...(q ? { search: q } : {}) },
+          params: {
+            limit: LIMIT,
+            offset: off,
+            ...(q ? { search: q } : {}),
+            ...(systems.length > 0 ? { source_systems: systems.join(',') } : {}),
+          },
         });
         const data = res.data;
         setRecords(data?.records ?? data ?? []);
         setTotal(data?.total ?? (data?.records ?? data ?? []).length);
+        setSourceCounts(data?.source_counts ?? []);
         setOffset(off);
       } catch {
         toast('Failed to load master records', 'error');
@@ -320,30 +331,34 @@ export default function MasterRecords() {
           applied_by: 'USER',
         });
         toast(`Applied ${correction.field_name} correction`, 'success');
-        await Promise.all([fetchStats(), fetchCorrectionsPreview(), fetchRecords(search, offset)]);
+        await Promise.all([
+          fetchStats(),
+          fetchCorrectionsPreview(),
+          fetchRecords(search, offset, Array.from(selectedSystems)),
+        ]);
       } catch {
         toast(`Failed to apply ${correction.field_name}`, 'error');
       } finally {
         setApplyingKey(null);
       }
     },
-    [fetchCorrectionsPreview, fetchRecords, fetchStats, offset, search, toast]
+    [fetchCorrectionsPreview, fetchRecords, fetchStats, offset, search, selectedSystems, toast]
   );
 
   useEffect(() => {
     fetchStats();
     fetchCorrectionsPreview();
-    fetchRecords('', 0);
+    fetchRecords('', 0, []);
   }, []);
 
   // ── Search with debounce ──────────────────────────────────────────────────
   useEffect(() => {
     clearTimeout(searchDebounce.current);
     searchDebounce.current = setTimeout(() => {
-      fetchRecords(search, 0);
+      fetchRecords(search, 0, Array.from(selectedSystems));
     }, 350);
     return () => clearTimeout(searchDebounce.current);
-  }, [search]);
+  }, [search, selectedSystems, fetchRecords]);
 
   // ── CSV export ────────────────────────────────────────────────────────────
   const exportCSV = async () => {
@@ -395,10 +410,8 @@ export default function MasterRecords() {
   const totalPages = Math.ceil(total / LIMIT);
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
-  // Get unique systems from all records
-  const availableSystems = Array.from(
-    new Set(records.flatMap(r => r.source_systems || []))
-  ).sort();
+  const availableSystems = sourceCounts.map((entry) => entry.source_system);
+  const sourceCountBySystem = new Map(sourceCounts.map((entry) => [entry.source_system, entry.count]));
 
   return (
     <div className="flex flex-col gap-6 animate-slide-up">
@@ -588,14 +601,14 @@ export default function MasterRecords() {
                     {system}
                   </span>
                   <span className="text-xs text-[var(--color-text-muted)]">
-                    ({records.filter(r => r.source_systems?.includes(system)).length})
+                    ({sourceCountBySystem.get(system) ?? 0})
                   </span>
                 </label>
               ))}
             </div>
             {selectedSystems.size > 0 && (
               <div className="text-xs font-mono text-[var(--color-accent-secondary)]">
-                📌 Showing {records.filter(r => r.source_systems?.some(sys => selectedSystems.has(sys))).length} of {records.length} records
+                📌 Showing {total.toLocaleString()} matching records
               </div>
             )}
           </div>
@@ -617,7 +630,7 @@ export default function MasterRecords() {
             />
           </div>
           <button
-            onClick={() => fetchRecords(search, offset)}
+            onClick={() => fetchRecords(search, offset, Array.from(selectedSystems))}
             className="p-2.5 rounded-xl panel-border text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)] transition-colors"
             title="Refresh"
           >
@@ -751,14 +764,14 @@ export default function MasterRecords() {
           </span>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => fetchRecords(search, offset - LIMIT)}
+              onClick={() => fetchRecords(search, offset - LIMIT, Array.from(selectedSystems))}
               disabled={offset === 0 || loading}
               className="flex items-center gap-1 px-3 py-1.5 rounded-lg panel-border font-mono text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <ChevronLeft size={14} /> Prev
             </button>
             <button
-              onClick={() => fetchRecords(search, offset + LIMIT)}
+              onClick={() => fetchRecords(search, offset + LIMIT, Array.from(selectedSystems))}
               disabled={offset + LIMIT >= total || loading}
               className="flex items-center gap-1 px-3 py-1.5 rounded-lg panel-border font-mono text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >

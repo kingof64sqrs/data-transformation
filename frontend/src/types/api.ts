@@ -31,6 +31,10 @@ export interface VaultRecord {
   raw_payload: Record<string, unknown>;
   kafka_offset: number;
   kafka_partition: number;
+  raw_completeness?: number;
+  format_validity?: Record<string, boolean> | string | null;
+  dlq_flag?: boolean;
+  dlq_reason?: string | null;
 }
 
 export interface CanonicalRecord {

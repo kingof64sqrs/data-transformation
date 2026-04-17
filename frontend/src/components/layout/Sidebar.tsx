@@ -30,13 +30,13 @@ const Sidebar = () => {
       items: [
         { name: 'Raw Vault', path: '/raw-vault', icon: Database, count: summary?.vault_records },
         { name: 'Canonical Layer', path: '/canonical', icon: Layers, count: summary?.canonical_records },
-        { name: 'Identity Graph', path: '/identity-graph', icon: Network, count: summary?.identity_matches },
         { name: 'Master Records', path: '/master-records', icon: Shield, count: summary?.master_records },
       ],
     },
     {
       label: 'OPERATIONS',
       items: [
+        { name: 'Identity Graph', path: '/identity-graph', icon: Network, count: summary?.identity_matches },
         { name: 'Review Workbench', path: '/review', icon: ListChecks, badge: reviewBadge > 0 ? reviewBadge : undefined },
         { name: 'Data Lineage', path: '/lineage', icon: Waypoints },
       ],

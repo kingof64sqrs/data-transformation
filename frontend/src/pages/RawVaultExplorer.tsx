@@ -47,6 +47,43 @@ function formatDateShort(iso: string | null): string {
   }
 }
 
+function parseValidityMap(validity: VaultRecord['format_validity']): Record<string, boolean> {
+  if (!validity) return {};
+  if (typeof validity === 'string') {
+    try {
+      const parsed = JSON.parse(validity);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return validity;
+}
+
+function validityStats(validity: VaultRecord['format_validity']) {
+  const map = parseValidityMap(validity);
+  const values = Object.values(map);
+  if (values.length === 0) {
+    return { total: 0, valid: 0, invalid: 0, pct: 100 };
+  }
+  const valid = values.filter(Boolean).length;
+  const invalid = values.length - valid;
+  return {
+    total: values.length,
+    valid,
+    invalid,
+    pct: Math.round((valid / values.length) * 100),
+  };
+}
+
+function correctnessScore(record: VaultRecord): number {
+  const completeness = Number(record.raw_completeness ?? 0);
+  const validityPct = validityStats(record.format_validity).pct;
+  const dlqPenalty = record.dlq_flag ? 30 : 0;
+  const score = Math.round(completeness * 0.55 + validityPct * 0.45 - dlqPenalty);
+  return Math.max(0, Math.min(100, score));
+}
+
 // ─── Skeleton Rows ────────────────────────────────────────────────────────────
 
 const TableSkeletonRows: React.FC<{ count?: number }> = ({ count = 8 }) => (
@@ -67,9 +104,11 @@ const TableSkeletonRows: React.FC<{ count?: number }> = ({ count = 8 }) => (
 
 const VaultRecordDetail: React.FC<{ record: VaultRecord }> = ({ record }) => {
   const prettyJson = JSON.stringify(record.raw_payload, null, 2);
+  const validity = validityStats(record.format_validity);
+  const quality = correctnessScore(record);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Kafka Metadata */}
       <div>
         <h3 className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-3">
@@ -83,8 +122,12 @@ const VaultRecordDetail: React.FC<{ record: VaultRecord }> = ({ record }) => {
             { label: 'Kafka Offset', value: String(record.kafka_offset) },
             { label: 'Kafka Partition', value: String(record.kafka_partition) },
             { label: 'Ingested At', value: formatDate(record.ingested_at) },
+            { label: 'Raw Completeness', value: `${Math.round(record.raw_completeness ?? 0)}%` },
+            { label: 'Format Validity', value: `${validity.pct}% (${validity.valid}/${validity.total || 0})` },
+            { label: 'Correctness Score', value: `${quality}%` },
+            { label: 'DLQ Status', value: record.dlq_flag ? `Flagged${record.dlq_reason ? `: ${record.dlq_reason}` : ''}` : 'Clean' },
           ].map(({ label, value }) => (
-            <div key={label} className="flex items-center px-4 py-2.5 gap-4">
+            <div key={label} className="flex items-center px-3 py-2 gap-3">
               <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] w-32 shrink-0">
                 {label}
               </span>
@@ -189,17 +232,17 @@ export default function RawVaultExplorer() {
   const total = recordsData?.total ?? 0;
 
   return (
-    <div className="space-y-5 animate-slide-up">
+    <div className="space-y-4 animate-slide-up">
 
       {/* ── Header ── */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+          <div className="w-9 h-9 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
             <Database size={18} className="text-amber-500" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-xl font-display font-semibold text-[var(--color-text-primary)]">
+              <h1 className="text-lg font-display font-semibold text-[var(--color-text-primary)]">
                 Raw Vault
               </h1>
               <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[10px] font-mono font-bold uppercase tracking-wider">
@@ -216,7 +259,7 @@ export default function RawVaultExplorer() {
         <button
           onClick={handleRefresh}
           disabled={isFetching}
-          className="flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)]/30 transition-all text-sm font-mono"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)]/30 transition-all text-xs font-mono"
         >
           <RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />
           Refresh
@@ -227,7 +270,7 @@ export default function RawVaultExplorer() {
       <LayerKPIStats layerName="Raw Vault" layerId={1} />
 
       {/* ── Search Bar ── */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2.5">
         <div className="relative flex-1 max-w-md">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
           <input
@@ -235,7 +278,7 @@ export default function RawVaultExplorer() {
             value={search}
             onChange={e => handleSearchChange(e.target.value)}
             placeholder="Search by Customer ID, Source System…"
-            className="w-full pl-9 pr-4 py-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-sm font-mono text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent-primary)]/50 transition-colors"
+            className="w-full pl-9 pr-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-xs font-mono text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent-primary)]/50 transition-colors"
           />
           {search && (
             <button
@@ -259,10 +302,10 @@ export default function RawVaultExplorer() {
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface-2)]/50">
-                {['Vault ID', 'Customer ID', 'Source System', 'Kafka Offset', 'Ingested At', ''].map(col => (
+                {['Vault ID', 'Customer ID', 'Source', 'Completeness', 'Validity', 'Correctness', 'Invalid', 'DLQ', 'Ingested At', ''].map(col => (
                   <th
                     key={col}
-                    className="px-4 py-3 font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] whitespace-nowrap"
+                    className="px-3 py-2.5 font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] whitespace-nowrap"
                   >
                     {col}
                   </th>
@@ -274,7 +317,7 @@ export default function RawVaultExplorer() {
                 <TableSkeletonRows count={8} />
               ) : allRecords.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-20 text-center">
+                  <td colSpan={10} className="py-14 text-center">
                     <div className="flex flex-col items-center gap-3 text-[var(--color-text-muted)]">
                       <Database size={36} className="opacity-30" />
                       <p className="font-mono text-sm">No vault records found</p>
@@ -295,24 +338,38 @@ export default function RawVaultExplorer() {
                       onClick={() => openPanel(record)}
                       className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-accent-primary)]/4 cursor-pointer transition-colors group"
                     >
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--color-text-muted)]">
+                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-muted)]">
                         #{record.vault_id}
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--color-text-primary)] font-medium">
+                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-primary)] font-medium">
                         {record.cust_id}
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-3 py-2.5">
                         <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-[var(--color-accent-primary)]/8 text-[var(--color-accent-primary)] border border-[var(--color-accent-primary)]/20">
                           {record.source_system}
                         </span>
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--color-text-secondary)] tabular-nums">
-                        {record.kafka_offset}
+                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)] tabular-nums">
+                        {Math.round(record.raw_completeness ?? 0)}%
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--color-text-secondary)] whitespace-nowrap">
+                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)] tabular-nums">
+                        {validityStats(record.format_validity).pct}%
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
+                        <span className={correctnessScore(record) >= 85 ? 'text-emerald-600 dark:text-emerald-300' : correctnessScore(record) >= 65 ? 'text-amber-600 dark:text-amber-300' : 'text-rose-600 dark:text-rose-300'}>
+                          {correctnessScore(record)}%
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)] tabular-nums">
+                        {validityStats(record.format_validity).invalid}
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)]">
+                        {record.dlq_flag ? 'Y' : 'N'}
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)] whitespace-nowrap">
                         {formatDateShort(record.ingested_at)}
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-3 py-2.5">
                         <span className="inline-flex items-center gap-1 text-xs font-mono text-[var(--color-text-muted)] group-hover:text-[var(--color-accent-primary)] transition-colors">
                           View
                           <ChevronRight size={13} />
@@ -326,7 +383,7 @@ export default function RawVaultExplorer() {
               {/* Load-more spinner row */}
               {isFetching && offset > 0 && (
                 <tr>
-                  <td colSpan={6} className="py-4 text-center">
+                  <td colSpan={10} className="py-4 text-center">
                     <span className="font-mono text-xs text-[var(--color-text-muted)] animate-pulse">
                       Loading more…
                     </span>
