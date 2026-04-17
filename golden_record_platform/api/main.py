@@ -14,7 +14,7 @@ import socket
 from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -23,6 +23,9 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from db_utils import get_db
+from golden_record_platform.pipeline.gold_rebuilder import GoldRebuilder
+from golden_record_platform.pipeline.live_ingestor import LiveIngestor
+from golden_record_platform.pipeline.match_scheduler import MatchScheduler
 from golden_record_platform.pipeline.orchestrator import run_pipeline
 from golden_record_platform.utils.azure_openai import call_gpt4_json, call_gpt4, is_ai_configured
 from golden_record_platform.utils.ai_prompts import (
@@ -32,6 +35,8 @@ from golden_record_platform.utils.ai_prompts import (
     EXPLAIN_MERGE_SYSTEM_PROMPT,
     CHAT_SYSTEM_PROMPT,
 )
+from golden_record_platform.utils.realtime import live_event_hub
+from golden_record_platform.utils.score_utils import normalize_json_list, to_percent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,14 +50,26 @@ _pipeline_running = False
 _pipeline_stage = ""
 _last_run_at: str | None = None
 _pipeline_history: list[dict] = []
+_worker_tasks: list[asyncio.Task] = []
+_worker_stop_event: asyncio.Event | None = None
 
 
 async def emit_event(event_type: str, message: str, data: dict | None = None) -> None:
-    await _event_queue.put({
+    summary = (data or {}).get("summary") or _summary_payload()
+    payload = {
         "type": event_type,
         "message": message,
         "data": data or {},
         "ts": datetime.utcnow().isoformat(),
+    }
+    await _event_queue.put(payload)
+    await live_event_hub.broadcast({
+        "type": event_type,
+        "timestamp": payload["ts"],
+        "record_id": (data or {}).get("record_id") or (data or {}).get("match_id") or (data or {}).get("master_id"),
+        "summary": summary,
+        "message": message,
+        "data": data or {},
     })
 
 
@@ -93,6 +110,15 @@ class AIChatRequest(BaseModel):
 
 class AIAnalyzeRequest(BaseModel):
     match_id: int
+
+
+class MasterCorrectionRequest(BaseModel):
+    master_id: int
+    field_name: str
+    proposed_value: str
+    source_record_id: Optional[str] = None
+    applied_by: Optional[str] = None
+    confidence: Optional[float] = None
 
 
 # ============================================================================
@@ -150,6 +176,42 @@ def _to_list(value: Any) -> list[str]:
     return [str(value).strip()]
 
 
+def _score(value: Any) -> float:
+    return to_percent(value)
+
+
+def _summary_payload() -> dict[str, Any]:
+    db = get_db()
+    row = db.fetch_one(
+        """
+        SELECT
+            COALESCE((SELECT COUNT(*) FROM db2_customer_simulated), 0) AS source_records,
+            COALESCE((SELECT COUNT(*) FROM bronze_customer), 0) AS vault_records,
+            COALESCE((SELECT COUNT(DISTINCT COALESCE(full_name,'') || '|' || COALESCE(birth_date,'')) FROM silver_customer), 0) AS canonical_records,
+            COALESCE((SELECT COUNT(*) FROM duplicate_matches), 0) AS identity_matches,
+            COALESCE((SELECT COUNT(*) FROM review_queue WHERE status='PENDING'), 0) AS review_pending,
+            COALESCE((SELECT COUNT(*) FROM gold_customer), 0) AS master_records,
+            COALESCE((SELECT COUNT(*) FROM duplicate_matches WHERE decision IN ('AUTO_MERGE','APPROVED')), 0) AS auto_merged,
+            COALESCE((SELECT COUNT(*) FROM review_queue WHERE status='PENDING'), 0) AS manual_review,
+            COALESCE((SELECT COUNT(*) FROM duplicate_matches WHERE decision IN ('SEPARATE','REJECTED')), 0) AS decided_separate
+        """
+    )
+    if not row:
+        return {}
+
+    data = dict(row)
+    vault = data.get("vault_records", 0)
+    canonical = data.get("canonical_records", 0)
+    identity = data.get("identity_matches", 0)
+    health = "healthy"
+    if vault == 0 or canonical == 0:
+        health = "degraded"
+    if identity == 0 and canonical > 0:
+        health = "degraded"
+    data["pipeline_health"] = health
+    return data
+
+
 def _as_frontend_record(row: dict) -> dict:
     full_name = row.get("full_name") or " ".join(
         p for p in [row.get("first_name"), row.get("last_name")] if p
@@ -199,9 +261,11 @@ def _gold_record(row: dict) -> dict:
         "source_ids": source_ids_list,
         "source_systems": source_systems_list,
         "confidence_score": round(confidence, 4),
+        "record_quality_score": round(_score(row.get("record_quality_score")), 2),
         "record_count": record_count,
         "created_at": row.get("created_at") or datetime.utcnow().isoformat(),
         "updated_at": row.get("updated_at") or datetime.utcnow().isoformat(),
+        "llm_summary": row.get("llm_summary") or "",
     }
 
 
@@ -251,8 +315,9 @@ def _fetch_match_rows(
         f"""
         SELECT
             dm.match_id, dm.silver_id_a, dm.silver_id_b, dm.ai_score,
-            dm.decision, dm.email_match, dm.phone_match, dm.name_similarity,
-            dm.dob_match, dm.city_similarity, dm.ai_reasoning,
+            dm.final_score, dm.decision, dm.email_match, dm.phone_match, dm.name_similarity,
+            dm.dob_match, dm.city_similarity, dm.address_similarity, dm.ai_reasoning,
+            dm.llm_explanation, dm.llm_confidence, dm.blocking_keys,
             s1.silver_id AS s1_silver_id, s1.cust_id AS s1_cust_id,
             s1.first_name AS s1_first_name, s1.last_name AS s1_last_name,
             s1.full_name AS s1_full_name, s1.email AS s1_email,
@@ -275,12 +340,13 @@ def _fetch_match_rows(
 
     formatted: list[dict] = []
     for row in rows:
-        score = float(row["ai_score"] or 0.0)
+        score = float(row["final_score"] or row["ai_score"] or 0.0)
         email_s = float(row["email_match"] or 0.0)
         phone_s = float(row["phone_match"] or 0.0)
         name_s = float(row["name_similarity"] or 0.0)
         dob_s = float(row["dob_match"] or 0.0)
         city_s = float(row["city_similarity"] or 0.0)
+        address_s = float(row["address_similarity"] or 0.0)
 
         r1 = _as_frontend_record({
             "silver_id": row["s1_silver_id"], "cust_id": row["s1_cust_id"],
@@ -312,8 +378,13 @@ def _fetch_match_rows(
                 "phone_score": round(phone_s, 4),
                 "name_score": round(name_s, 4),
                 "dob_score": round(dob_s, 4),
-                "address_score": round(city_s, 4),
+                "city_score": round(city_s, 4),
+                "address_score": round(address_s, 4),
             },
+            "llm_explanation": row["llm_explanation"] or "",
+            "llm_confidence": round(float(row["llm_confidence"] or 0.0), 2),
+            "final_score": round(score, 2),
+            "blocking_keys": normalize_json_list(row.get("blocking_keys")),
         })
 
     return formatted, total
@@ -336,6 +407,62 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.on_event("startup")
+async def startup_workers() -> None:
+    global _worker_stop_event, _worker_tasks
+
+    if not _env_flag("ENABLE_BACKGROUND_WORKERS", False):
+        logger.info("Background workers disabled (ENABLE_BACKGROUND_WORKERS=false)")
+        return
+
+    if _worker_tasks:
+        return
+
+    _worker_stop_event = asyncio.Event()
+
+    async def emit_from_worker(event_type: str, message: str, data: dict | None = None) -> None:
+        await emit_event(event_type, message, data)
+
+    ingestor = LiveIngestor(
+        interval_seconds=float(os.getenv("LIVE_INGESTOR_INTERVAL_SECONDS", "5")),
+        max_messages_per_cycle=int(os.getenv("LIVE_INGESTOR_MAX_MESSAGES", "50")),
+    )
+    scheduler = MatchScheduler(
+        interval_seconds=float(os.getenv("MATCH_SCHEDULER_INTERVAL_SECONDS", "60")),
+    )
+    rebuilder = GoldRebuilder(
+        interval_seconds=float(os.getenv("GOLD_REBUILDER_INTERVAL_SECONDS", "45")),
+    )
+
+    _worker_tasks = [
+        asyncio.create_task(ingestor.run(_worker_stop_event, emit_from_worker), name="live-ingestor"),
+        asyncio.create_task(scheduler.run(_worker_stop_event, emit_from_worker), name="match-scheduler"),
+        asyncio.create_task(rebuilder.run(_worker_stop_event, emit_from_worker), name="gold-rebuilder"),
+    ]
+    logger.info("Started %d background workers", len(_worker_tasks))
+
+
+@app.on_event("shutdown")
+async def shutdown_workers() -> None:
+    global _worker_stop_event, _worker_tasks
+
+    if _worker_stop_event is not None:
+        _worker_stop_event.set()
+
+    if _worker_tasks:
+        await asyncio.gather(*_worker_tasks, return_exceptions=True)
+
+    _worker_tasks = []
+    _worker_stop_event = None
 
 
 # ============================================================================
@@ -376,37 +503,7 @@ async def health_check():
 @app.get("/summary")
 async def get_summary():
     try:
-        db = get_db()
-        row = db.fetch_one(
-            """
-            SELECT
-                COALESCE((SELECT COUNT(*) FROM db2_customer_simulated), 0) AS source_records,
-                COALESCE((SELECT COUNT(*) FROM bronze_customer), 0) AS vault_records,
-                COALESCE((
-                    SELECT COUNT(DISTINCT COALESCE(full_name,'') || '|' || COALESCE(birth_date,''))
-                    FROM silver_customer
-                ), 0) AS canonical_records,
-                COALESCE((SELECT COUNT(*) FROM bronze_customer), 0) AS vault_event_records,
-                COALESCE((SELECT COUNT(*) FROM silver_customer), 0) AS canonical_event_records,
-                COALESCE((SELECT COUNT(*) FROM duplicate_matches), 0) AS identity_matches,
-                COALESCE((SELECT COUNT(*) FROM review_queue WHERE status='PENDING'), 0) AS review_pending,
-                COALESCE((SELECT COUNT(*) FROM gold_customer), 0) AS master_records,
-                COALESCE((SELECT COUNT(*) FROM duplicate_matches WHERE decision IN ('AUTO_MERGE','APPROVED')), 0) AS auto_merged,
-                COALESCE((SELECT COUNT(*) FROM review_queue WHERE status='PENDING'), 0) AS manual_review,
-                COALESCE((SELECT COUNT(*) FROM duplicate_matches WHERE decision IN ('SEPARATE','REJECTED')), 0) AS decided_separate
-            """
-        )
-        data = dict(row)
-        vault = data.get("vault_records", 0)
-        canonical = data.get("canonical_records", 0)
-        identity = data.get("identity_matches", 0)
-        health = "healthy"
-        if vault == 0 or canonical == 0:
-            health = "degraded"
-        if identity == 0 and canonical > 0:
-            health = "degraded"
-        data["pipeline_health"] = health
-        return data
+        return _summary_payload()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -480,7 +577,7 @@ async def get_quality_progression():
         identity_quality_row = db.fetch_one(
             """
             SELECT
-                ROUND(AVG(composite_score) * 100, 2) AS avg_conf,
+                ROUND(AVG(COALESCE(final_score, ai_score)), 2) AS avg_conf,
                 ROUND(AVG(CASE WHEN decision IN ('AUTO_MERGE','APPROVED','SEPARATE','REJECTED') THEN 1.0 ELSE 0.0 END) * 100, 2) AS resolved_pct
             FROM duplicate_matches
             """
@@ -662,6 +759,18 @@ async def _event_generator() -> AsyncGenerator[str, None]:
 @app.get("/events")
 async def stream_events():
     return StreamingResponse(_event_generator(), media_type="text/event-stream")
+
+
+@app.websocket("/ws/live-feed")
+async def live_feed_socket(websocket: WebSocket):
+    await live_event_hub.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await live_event_hub.disconnect(websocket)
+    except Exception:
+        await live_event_hub.disconnect(websocket)
 
 
 # ============================================================================
@@ -876,7 +985,7 @@ async def vault_records(
         for r in rows:
             payload = {}
             try:
-                payload = json.loads(r.get("raw_payload") or "{}")
+                payload = json.loads(r.get("raw_json") or "{}")
             except Exception:
                 pass
             records.append({
@@ -886,6 +995,10 @@ async def vault_records(
                 "ingested_at": r.get("ingested_at") or "",
                 "kafka_offset": r.get("kafka_offset") or 0,
                 "kafka_partition": r.get("kafka_partition") or 0,
+                "raw_completeness": _score(r.get("raw_completeness")),
+                "format_validity": r.get("format_validity"),
+                "dlq_flag": bool(r.get("dlq_flag") or 0),
+                "dlq_reason": r.get("dlq_reason"),
                 "raw_payload": payload or {
                     "first_name": r.get("first_nm"),
                     "last_name": r.get("last_nm"),
@@ -919,7 +1032,7 @@ async def vault_record_detail(vault_id: int):
             raise HTTPException(status_code=404, detail="Vault record not found")
         payload = {}
         try:
-            payload = json.loads(row.get("raw_payload") or "{}")
+            payload = json.loads(row.get("raw_json") or "{}")
         except Exception:
             pass
         return {
@@ -1313,12 +1426,17 @@ async def review_decide(request: ReviewDecisionRequest):
             (review_status, request.match_id),
         )
         db.execute_query(
-            "UPDATE duplicate_matches SET decision = ? WHERE match_id = ?",
+            "UPDATE duplicate_matches SET decision = ?, final_score = COALESCE(final_score, ai_score) WHERE match_id = ?",
             (match_decision, request.match_id),
         )
 
         remaining = db.fetch_one(
             "SELECT COUNT(*) as cnt FROM review_queue WHERE status = 'PENDING'"
+        )
+        await emit_event(
+            "review_decision",
+            f"Review decision saved for match {request.match_id}",
+            {"match_id": request.match_id, "decision": request.decision, "summary": _summary_payload()},
         )
         return {
             "status": "success",
@@ -1491,6 +1609,7 @@ async def master_corrections_preview(limit: int = Query(2, ge=1, le=5)):
                 s.last_name AS canonical_last_name,
                 s.email AS canonical_email,
                 s.phone AS canonical_phone,
+                s.address AS canonical_address,
                 s.city AS canonical_city,
                 s.state AS canonical_state
             FROM db2_customer_simulated d
@@ -1532,24 +1651,35 @@ async def master_corrections_preview(limit: int = Query(2, ge=1, le=5)):
             if not master_row:
                 continue
 
-            corrected_fields: list[str] = []
-            if (row.get("raw_first_name") or "").strip().lower() != (row.get("canonical_first_name") or "").strip().lower():
-                corrected_fields.append("first_name")
-            if (row.get("raw_last_name") or "").strip().lower() != (row.get("canonical_last_name") or "").strip().lower():
-                corrected_fields.append("last_name")
-            if (row.get("raw_email") or "").strip().lower() != (row.get("canonical_email") or "").strip().lower():
-                corrected_fields.append("email")
-            if (row.get("raw_phone") or "").strip().lower() != (row.get("canonical_phone") or "").strip().lower():
-                corrected_fields.append("phone")
-            if (row.get("raw_city") or "").strip().lower() != (row.get("canonical_city") or "").strip().lower():
-                corrected_fields.append("city")
-            if (row.get("raw_state") or "").strip().lower() != (row.get("canonical_state") or "").strip().lower():
-                corrected_fields.append("state")
+            master = _gold_record(dict(master_row))
+            canonical_full_name = " ".join(
+                part for part in [row.get("canonical_first_name") or "", row.get("canonical_last_name") or ""] if part
+            ).strip()
+            correction_rows: list[dict[str, Any]] = []
 
-            if not corrected_fields:
+            def add_correction(field_name: str, current_value: str, proposed_value: str, score: float) -> None:
+                if not proposed_value:
+                    return
+                if current_value.strip().lower() == proposed_value.strip().lower():
+                    return
+                correction_rows.append({
+                    "field_name": field_name,
+                    "current_value": current_value,
+                    "proposed_value": proposed_value,
+                    "confidence": round(score, 1),
+                    "source_record_id": cust_id,
+                })
+
+            add_correction("full_name", master.get("full_name") or "", canonical_full_name, 95.0)
+            add_correction("email_primary", master.get("email_primary") or "", row.get("canonical_email") or "", 95.0)
+            add_correction("phone", master.get("phone") or "", row.get("canonical_phone") or "", 93.0)
+            add_correction("address", master.get("address") or "", row.get("canonical_address") or "", 90.0)
+            add_correction("city", master.get("city") or "", row.get("canonical_city") or "", 88.0)
+            add_correction("state", master.get("state") or "", row.get("canonical_state") or "", 88.0)
+
+            if not correction_rows:
                 continue
 
-            master = _gold_record(dict(master_row))
             previews.append({
                 "cust_id": cust_id,
                 "raw": {
@@ -1567,10 +1697,69 @@ async def master_corrections_preview(limit: int = Query(2, ge=1, le=5)):
                     "city": master.get("city"),
                     "state": master.get("state"),
                 },
-                "corrected_fields": corrected_fields,
+                "corrections": correction_rows,
             })
 
         return {"examples": previews[:limit]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/master/apply-correction")
+async def master_apply_correction(request: MasterCorrectionRequest):
+    try:
+        db = get_db()
+        column_map = {
+            "full_name": "name",
+            "email_primary": "email_primary",
+            "phone": "phone",
+            "birth_date": "birth_date",
+            "address": "address",
+            "city": "city",
+            "state": "state",
+        }
+        column = column_map.get(request.field_name)
+        if not column:
+            raise HTTPException(status_code=400, detail="Unsupported correction field")
+
+        existing = db.fetch_one(f"SELECT golden_id, {column} AS current_value FROM gold_customer WHERE golden_id = ?", [request.master_id])
+        if not existing:
+            raise HTTPException(status_code=404, detail="Master record not found")
+
+        old_value = existing.get("current_value")
+        db.execute_query(
+            f"UPDATE gold_customer SET {column} = ?, last_reeval_at = ? WHERE golden_id = ?",
+            (request.proposed_value, datetime.utcnow().isoformat(timespec="seconds"), request.master_id),
+        )
+        db.insert_record(
+            "correction_history",
+            {
+                "master_id": str(request.master_id),
+                "field_name": request.field_name,
+                "old_value": old_value,
+                "new_value": request.proposed_value,
+                "applied_by": request.applied_by or "AUTO",
+                "llm_rationale": f"Applied preview correction for {request.field_name} from source {request.source_record_id or 'unknown'}.",
+                "confidence": request.confidence if request.confidence is not None else 90.0,
+            },
+        )
+        updated = db.fetch_one("SELECT * FROM gold_customer WHERE golden_id = ?", [request.master_id])
+        await emit_event(
+            "gold_correction",
+            f"Applied correction to master {request.master_id}",
+            {
+                "master_id": request.master_id,
+                "field_name": request.field_name,
+                "source_record_id": request.source_record_id,
+                "summary": _summary_payload(),
+            },
+        )
+        return {
+            "status": "success",
+            "master": _gold_record(dict(updated)) if updated else None,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1770,13 +1959,13 @@ async def ai_analyze_match(request: AIAnalyzeRequest):
             score = match["composite_score"]
             sig = match.get("signals", {})
             if score >= 90:
-                sugg, conf, reason = "approve", 0.92, "High composite score with multiple matching signals strongly indicates same person."
+                sugg, conf, reason = "approve", 92.0, "High composite score with multiple matching signals strongly indicates same person."
                 keys = ["high composite score", "multiple signal match"]
             elif score >= 70:
-                sugg, conf, reason = "uncertain", 0.65, "Moderate confidence. Review key signals before deciding."
+                sugg, conf, reason = "uncertain", 65.0, "Moderate confidence. Review key signals before deciding."
                 keys = ["moderate composite score"]
             else:
-                sugg, conf, reason = "reject", 0.80, "Low confidence score. Signals do not sufficiently support merge."
+                sugg, conf, reason = "reject", 80.0, "Low confidence score. Signals do not sufficiently support merge."
                 keys = ["low composite score"]
             return {
                 "suggestion": sugg,
@@ -1808,7 +1997,7 @@ async def ai_analyze_match(request: AIAnalyzeRequest):
             email_score=round(sig.get("email_score", 0), 2),
             phone_score=round(sig.get("phone_score", 0), 2),
             name_score=round(sig.get("name_score", 0), 2),
-            name_score_pct=round(sig.get("name_score", 0) * 100, 1),
+            name_score_pct=round(sig.get("name_score", 0), 1),
             dob_score=round(sig.get("dob_score", 0), 2),
             address_score=round(sig.get("address_score", 0), 2),
             ai_confidence=round(match["composite_score"], 1),
@@ -1835,7 +2024,7 @@ async def ai_explain_record(master_id: str):
 
         if not is_ai_configured():
             return {
-                "explanation": f"Master record {master_id} consolidates {gr['record_count']} source record(s) with {round(gr['confidence_score']*100, 1)}% confidence.",
+                "explanation": f"Master record {master_id} consolidates {gr['record_count']} source record(s) with {round(gr['confidence_score'], 1)}% confidence.",
                 "merge_rationale": "Records were merged based on high similarity scores across email, phone, and name fields.",
             }
 
@@ -1848,7 +2037,7 @@ async def ai_explain_record(master_id: str):
         explanation = await call_gpt4(EXPLAIN_MERGE_SYSTEM_PROMPT, user_msg, max_tokens=300)
         return {
             "explanation": explanation,
-            "merge_rationale": f"Merged {gr['record_count']} records with {round(gr['confidence_score']*100,1)}% confidence.",
+            "merge_rationale": f"Merged {gr['record_count']} records with {round(gr['confidence_score'],1)}% confidence.",
         }
     except HTTPException:
         raise

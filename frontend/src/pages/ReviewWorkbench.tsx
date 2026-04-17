@@ -62,7 +62,7 @@ function Confetti() {
 
 // ─── Mini queue preview card ────────────────────────────────────────────────────
 function MiniCard({ item }: { item: ReviewItem }) {
-  const score = Math.round((item.composite_score ?? 0) * 100);
+  const score = Math.round(item.composite_score ?? 0);
   const scoreColor =
     score >= 80
       ? 'text-[var(--color-success)]'
@@ -183,25 +183,24 @@ export default function ReviewWorkbench() {
       if (!current || deciding) return;
       setDeciding(true);
 
-      // Optimistic: remove from front
-      setQueue((prev) => prev.slice(1));
-      setAiSuggestion(null);
-
-      const label = decision === 'approve' ? 'Approved' : decision === 'reject' ? 'Rejected' : 'Skipped';
-      toast(`Match #${current.match_id} — ${label}`, decision === 'approve' ? 'success' : 'info');
-
       if (decision !== 'skip') {
         try {
           await api.post('/review/decide', {
             match_id: current.match_id,
             decision,
           });
+          setQueue((prev) => prev.slice(1));
+          setAiSuggestion(null);
+          const label = decision === 'approve' ? 'Approved' : 'Rejected';
+          toast(`Match #${current.match_id} — ${label}`, 'success');
           fetchStats();
         } catch {
           toast(`Failed to save decision for #${current.match_id}`, 'error');
-          // Re-insert if failed
-          setQueue((prev) => [current, ...prev]);
         }
+      } else {
+        setQueue((prev) => prev.slice(1));
+        setAiSuggestion(null);
+        toast(`Match #${current.match_id} — Skipped`, 'info');
       }
 
       setDeciding(false);
@@ -428,14 +427,14 @@ export default function ReviewWorkbench() {
               <span
                 className={cn(
                   'font-bold',
-                  (current.composite_score ?? 0) >= 0.8
+                  (current.composite_score ?? 0) >= 80
                     ? 'text-[var(--color-success)]'
-                    : (current.composite_score ?? 0) >= 0.5
+                    : (current.composite_score ?? 0) >= 50
                     ? 'text-[var(--color-warning)]'
                     : 'text-[var(--color-danger)]'
                 )}
               >
-                {Math.round((current.composite_score ?? 0) * 100)}%
+                {Math.round(current.composite_score ?? 0)}%
               </span>
             </span>
           </div>

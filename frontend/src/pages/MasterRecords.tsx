@@ -16,7 +16,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { LayerKPIStats } from '@/components/ui/LayerKPIStats';
 import { useToast } from '@/components/ui/Toast';
-import type { MasterRecord } from '@/types/api';
+import type { MasterCorrectionExample, MasterRecord } from '@/types/api';
 import { cn } from '@/lib/utils';
 
 interface MasterStats {
@@ -36,35 +36,15 @@ interface MasterApiResponse {
   offset: number;
 }
 
-interface CorrectionExample {
-  cust_id: string;
-  raw: {
-    full_name: string;
-    email: string;
-    phone: string;
-    city: string;
-    state: string;
-  };
-  master: {
-    master_id: string;
-    full_name: string;
-    email: string;
-    phone: string;
-    city: string;
-    state: string;
-  };
-  corrected_fields: string[];
-}
-
 const LIMIT = 100;
 
 // ─── Confidence bar (inline, small) ─────────────────────────────────────────
 function ConfidenceBar({ value }: { value: number }) {
-  const pct = Math.max(0, Math.min(1, value));
+  const pct = Math.max(0, Math.min(100, value));
   const color =
-    pct >= 0.8
+    pct >= 80
       ? 'var(--color-success)'
-      : pct >= 0.5
+      : pct >= 50
       ? 'var(--color-warning)'
       : 'var(--color-danger)';
 
@@ -73,14 +53,14 @@ function ConfidenceBar({ value }: { value: number }) {
       <div className="flex-1 h-1.5 rounded-full bg-[var(--color-border)] overflow-hidden">
         <div
           className="h-full rounded-full transition-all duration-500"
-          style={{ width: `${pct * 100}%`, backgroundColor: color }}
+          style={{ width: `${pct}%`, backgroundColor: color }}
         />
       </div>
       <span
         className="font-mono font-bold text-xs tabular-nums shrink-0"
         style={{ color }}
       >
-        {Math.round(pct * 100)}%
+        {Math.round(pct)}%
       </span>
     </div>
   );
@@ -281,7 +261,10 @@ export default function MasterRecords() {
   const [offset, setOffset] = useState(0);
   const [selectedRecord, setSelectedRecord] = useState<MasterRecord | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [corrections, setCorrections] = useState<CorrectionExample[]>([]);
+  const [corrections, setCorrections] = useState<MasterCorrectionExample[]>([]);
+  const [applyingKey, setApplyingKey] = useState<string | null>(null);
+  const [selectedSystems, setSelectedSystems] = useState<Set<string>>(new Set());
+  const [loading_db, setLoadingDb] = useState(false);
 
   const searchDebounce = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -323,6 +306,30 @@ export default function MasterRecords() {
     }
   }, []);
 
+  const applyCorrection = useCallback(
+    async (example: MasterCorrectionExample, correction: MasterCorrectionExample['corrections'][number]) => {
+      const key = `${example.cust_id}:${correction.field_name}`;
+      setApplyingKey(key);
+      try {
+        await api.post('/master/apply-correction', {
+          master_id: Number(example.master.master_id),
+          field_name: correction.field_name,
+          proposed_value: correction.proposed_value,
+          source_record_id: example.cust_id,
+          confidence: correction.confidence,
+          applied_by: 'USER',
+        });
+        toast(`Applied ${correction.field_name} correction`, 'success');
+        await Promise.all([fetchStats(), fetchCorrectionsPreview(), fetchRecords(search, offset)]);
+      } catch {
+        toast(`Failed to apply ${correction.field_name}`, 'error');
+      } finally {
+        setApplyingKey(null);
+      }
+    },
+    [fetchCorrectionsPreview, fetchRecords, fetchStats, offset, search, toast]
+  );
+
   useEffect(() => {
     fetchStats();
     fetchCorrectionsPreview();
@@ -360,10 +367,38 @@ export default function MasterRecords() {
     }
   };
 
+  // ── Load to Database ───────────────────────────────────────────────────────
+  const loadToDatabase = async () => {
+    setLoadingDb(true);
+    try {
+      const filteredRecords = selectedSystems.size === 0 
+        ? records 
+        : records.filter(rec => 
+            rec.source_systems?.some(sys => selectedSystems.has(sys))
+          );
+
+      const res = await api.post('/master/load-to-db', {
+        records: filteredRecords,
+        filters: {
+          selected_systems: Array.from(selectedSystems),
+          search: search,
+        }
+      });
+      toast(res.data?.message || 'Data loaded to database successfully', 'success');
+    } catch (error: any) {
+      toast(error?.response?.data?.detail || 'Failed to load data to database', 'error');
+    } finally {
+      setLoadingDb(false);
+    }
+  };
+
   const totalPages = Math.ceil(total / LIMIT);
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
-  return (
+  // Get unique systems from all records
+  const availableSystems = Array.from(
+    new Set(records.flatMap(r => r.source_systems || []))
+  ).sort();
     <div className="flex flex-col gap-6 animate-slide-up">
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
@@ -415,6 +450,84 @@ export default function MasterRecords() {
 
       {/* ── Layer Quality KPIs ── */}
       <LayerKPIStats layerName="Master Records" layerId={4} />
+
+      {/* ── Correction Preview ── */}
+      <div className="panel-border rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="font-mono text-xs uppercase tracking-widest text-[var(--color-text-muted)]">
+              Proposed Corrections
+            </h2>
+            <p className="text-[11px] font-mono text-[var(--color-text-muted)] mt-1">
+              Apply a proposed field correction directly to the selected master record.
+            </p>
+          </div>
+          <button
+            onClick={fetchCorrectionsPreview}
+            className="flex items-center gap-2 px-3 py-2 rounded-xl panel-border font-mono text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)] transition-colors"
+          >
+            <RefreshCw size={14} />
+            Refresh Preview
+          </button>
+        </div>
+
+        {corrections.length === 0 ? (
+          <div className="py-6 text-center text-[var(--color-text-muted)] font-mono text-sm">
+            No correction candidates found right now.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {corrections.map((example) => (
+              <div key={example.cust_id} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-1)] p-4 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">
+                      Source {example.cust_id}
+                    </p>
+                    <p className="text-sm text-[var(--color-text-primary)] font-medium">{example.raw.full_name || 'Unnamed source'}</p>
+                  </div>
+                  <StatusBadge status="WARN">{example.corrections.length} correction{example.corrections.length === 1 ? '' : 's'}</StatusBadge>
+                </div>
+                <div className="text-[11px] font-mono text-[var(--color-text-muted)] space-y-1">
+                  <p>Master: {example.master.full_name} · {example.master.master_id}</p>
+                  <p>{[example.master.email, example.master.phone, example.master.city].filter(Boolean).join(' · ')}</p>
+                </div>
+                <div className="space-y-2">
+                  {example.corrections.map((correction) => {
+                    const key = `${example.cust_id}:${correction.field_name}`;
+                    const pending = applyingKey === key;
+                    return (
+                      <div key={key} className="rounded-lg border border-[var(--color-border)]/80 bg-[var(--color-surface-2)]/60 px-3 py-2 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">
+                            {correction.field_name}
+                          </p>
+                          <p className="text-xs text-[var(--color-text-secondary)] truncate">
+                            Current: <span className="text-[var(--color-text-primary)]">{correction.current_value || '—'}</span>
+                          </p>
+                          <p className="text-xs text-[var(--color-text-secondary)] truncate">
+                            Proposed: <span className="text-[var(--color-success)]">{correction.proposed_value || '—'}</span>
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="font-mono text-[10px] text-[var(--color-text-muted)]">{Math.round(correction.confidence)}%</span>
+                          <button
+                            onClick={() => applyCorrection(example, correction)}
+                            disabled={pending}
+                            className="px-3 py-1.5 rounded-lg bg-[var(--color-accent-primary)]/10 text-[var(--color-accent-primary)] border border-[var(--color-accent-primary)]/30 font-mono text-[10px] uppercase tracking-widest disabled:opacity-50"
+                          >
+                            {pending ? 'Applying' : 'Apply'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* ── Search & filters ─────────────────────────────────────────────── */}
       <div className="flex items-center gap-3">

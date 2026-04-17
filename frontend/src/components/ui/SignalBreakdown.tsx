@@ -16,19 +16,19 @@ interface SignalBarProps {
 }
 
 function getBarColor(value: number): string {
-  if (value >= 0.8) return 'var(--color-success)';
-  if (value >= 0.5) return 'var(--color-warning)';
+  if (value >= 80) return 'var(--color-success)';
+  if (value >= 50) return 'var(--color-warning)';
   return 'var(--color-danger)';
 }
 
 function getTextColor(value: number): string {
-  if (value >= 0.8) return 'text-[var(--color-success)]';
-  if (value >= 0.5) return 'text-[var(--color-warning)]';
+  if (value >= 80) return 'text-[var(--color-success)]';
+  if (value >= 50) return 'text-[var(--color-warning)]';
   return 'text-[var(--color-danger)]';
 }
 
 const SignalBar: React.FC<SignalBarProps> = ({ label, value, large = false, color = 'auto' }) => {
-  const pct = Math.max(0, Math.min(1, value ?? 0));
+  const pct = Math.max(0, Math.min(100, value ?? 0));
   const barColor = color === 'purple' ? 'var(--color-accent-secondary)' : getBarColor(pct);
   const textCls = color === 'purple' ? 'text-[var(--color-accent-secondary)]' : getTextColor(pct);
 
@@ -44,7 +44,7 @@ const SignalBar: React.FC<SignalBarProps> = ({ label, value, large = false, colo
           {label}
         </span>
         <span className={cn('font-mono font-bold tabular-nums', large ? 'text-sm' : 'text-xs', textCls)}>
-          {Math.round(pct * 100)}%
+          {Math.round(pct)}%
         </span>
       </div>
       <div
@@ -56,7 +56,7 @@ const SignalBar: React.FC<SignalBarProps> = ({ label, value, large = false, colo
         <div
           className="h-full rounded-full transition-all duration-700 ease-out"
           style={{
-            width: `${pct * 100}%`,
+            width: `${pct}%`,
             backgroundColor: barColor,
             boxShadow: `0 0 6px ${barColor}60`,
           }}

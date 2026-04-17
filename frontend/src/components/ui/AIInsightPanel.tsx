@@ -45,11 +45,11 @@ function SuggestionBadge({ suggestion }: { suggestion: AISuggestion['suggestion'
 }
 
 function ConfidenceMeter({ value }: { value: number }) {
-  const pct = Math.max(0, Math.min(1, value));
+  const pct = Math.max(0, Math.min(100, value));
   const color =
-    pct >= 0.8
+    pct >= 80
       ? 'var(--color-success)'
-      : pct >= 0.5
+      : pct >= 50
       ? 'var(--color-warning)'
       : 'var(--color-danger)';
 
@@ -61,14 +61,14 @@ function ConfidenceMeter({ value }: { value: number }) {
       <div className="flex-1 h-1.5 rounded-full bg-[var(--color-border)] overflow-hidden">
         <div
           className="h-full rounded-full transition-all duration-700"
-          style={{ width: `${pct * 100}%`, backgroundColor: color, boxShadow: `0 0 6px ${color}80` }}
+          style={{ width: `${pct}%`, backgroundColor: color, boxShadow: `0 0 6px ${color}80` }}
         />
       </div>
       <span
         className="font-mono font-bold text-sm tabular-nums shrink-0"
         style={{ color }}
       >
-        {Math.round(pct * 100)}%
+        {Math.round(pct)}%
       </span>
     </div>
   );

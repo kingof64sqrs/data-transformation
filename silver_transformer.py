@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 
 from db_utils import get_db
+from golden_record_platform.utils.score_utils import compute_blocking_keys
 
 
 class SilverTransformer:
@@ -78,9 +79,42 @@ class SilverTransformer:
             row.get("birth_date"),
             row.get("address"),
             row.get("city"),
+            row.get("state"),
+            row.get("cust_id"),
         ]
         filled = sum(1 for item in fields if item)
         return round((filled / len(fields)) * 100, 1)
+
+    @staticmethod
+    def field_validity(row: dict) -> float:
+        checks = {
+            "email": lambda value: bool(value and re.match(r"^[^@]+@[^@]+\.[^@]+$", value)),
+            "phone": lambda value: bool(value and re.match(r"^\+?\d{7,15}$", re.sub(r"\D", "", value))),
+            "birth_date": lambda value: bool(value and re.match(r"^\d{4}-\d{2}-\d{2}$", value)),
+            "state": lambda value: bool(value and len(str(value).strip()) >= 2),
+        }
+        present = {key: value for key, value in row.items() if key in checks and value}
+        if not present:
+            return 100.0
+        valid = sum(1 for key, value in present.items() if checks[key](str(value)))
+        return round((valid / len(present)) * 100, 1)
+
+    @staticmethod
+    def detect_anomalies(row: dict) -> list[str]:
+        flags: list[str] = []
+        birth_date = row.get("birth_date") or ""
+        if birth_date:
+            try:
+                year = datetime.strptime(birth_date, "%Y-%m-%d").year
+                age = datetime.utcnow().year - year
+                if age < 0 or age > 120:
+                    flags.append("INVALID_AGE")
+            except ValueError:
+                flags.append("INVALID_DOB")
+        email = (row.get("email") or "").lower()
+        if email.endswith(("mailinator.com", "tempmail.com", "10minutemail.com")):
+            flags.append("DISPOSABLE_EMAIL")
+        return flags
 
     @classmethod
     def transform_record(cls, bronze: dict) -> dict:
@@ -108,8 +142,15 @@ class SilverTransformer:
             "email_valid": 1 if email and re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email) else 0,
             "phone_valid": 1 if phone and re.match(r"^\+\d{10,15}$", phone) else 0,
             "completeness": 0.0,
+            "field_validity_pct": 0.0,
+            "anomaly_flags": [],
+            "blocking_keys": [],
+            "normalized_at": datetime.utcnow().isoformat(timespec="seconds"),
         }
         row["completeness"] = cls.completeness(row)
+        row["field_validity_pct"] = cls.field_validity(row)
+        row["anomaly_flags"] = cls.detect_anomalies(row)
+        row["blocking_keys"] = compute_blocking_keys(row)
         return row
 
     @classmethod

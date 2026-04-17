@@ -4,18 +4,11 @@ import {
   LayoutGrid, GitBranch, Database, Layers, Network,
   ListChecks, Waypoints, Settings, Shield
 } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
-import api from '@/api/client';
-import type { SummaryStats } from '@/types/api';
+import { useLiveFeed } from '@/hooks/useLiveFeed';
 
 const Sidebar = () => {
   const location = useLocation();
-
-  const { data: summary } = useQuery<SummaryStats>({
-    queryKey: ['summary'],
-    queryFn: () => api.get('/summary').then(r => r.data),
-    refetchInterval: 30_000,
-  });
+  const { summary } = useLiveFeed();
 
   const reviewBadge = summary?.review_pending ?? 0;
 

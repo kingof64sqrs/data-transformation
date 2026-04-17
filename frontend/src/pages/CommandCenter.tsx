@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
 import {
   BarChart,
   Bar,
@@ -17,6 +16,7 @@ import api from '@/api/client';
 import { KpiCard } from '@/components/ui/KpiCard';
 import { Skeleton } from '@/components/ui/Skeleton';
 import type { SummaryStats, DataQualityReport } from '@/types/api';
+import { useLiveFeed } from '@/hooks/useLiveFeed';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -198,24 +198,44 @@ const DonutTooltip = ({ active, payload }: any) => {
   );
 };
 
+function LiveEventRow({
+  type,
+  message,
+  ts,
+}: {
+  type: string;
+  message: string;
+  ts?: string;
+}) {
+  const stamp = ts ? new Date(ts).toLocaleTimeString([], { hour12: false }) : 'now';
+  const label = type.replace(/_/g, ' ').toUpperCase();
+  const colorClass =
+    type.includes('gold') || type.includes('merge')
+      ? 'text-[var(--color-success)]'
+      : type.includes('review')
+      ? 'text-[var(--color-warning)]'
+      : 'text-[var(--color-accent-primary)]';
+
+  return (
+    <div className="flex items-start gap-3 py-2.5 border-b border-[var(--color-border)]/50 last:border-b-0">
+      <span className={`font-mono text-[10px] uppercase tracking-widest shrink-0 ${colorClass}`}>
+        {label}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm text-[var(--color-text-primary)] leading-snug">{message}</p>
+        <p className="text-[10px] font-mono text-[var(--color-text-muted)] mt-1">{stamp}</p>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function CommandCenter() {
-  // Summary polled every 30 s
-  const {
-    data: summary,
-    dataUpdatedAt,
-    isLoading: summaryLoading,
-  } = useQuery<SummaryStats>({
-    queryKey: ['summary'],
-    queryFn: async () => {
-      const res = await api.get<SummaryStats>('/summary');
-      return res.data;
-    },
-    refetchInterval: 30_000,
-  });
-
-  const resetKey = dataUpdatedAt;
+  const { summary, recentEvents, connected } = useLiveFeed();
+  const summaryLoading = !summary;
+  const lastEventStamp = recentEvents[0]?.timestamp ?? recentEvents[0]?.ts;
+  const resetKey = lastEventStamp ? new Date(lastEventStamp).getTime() : 0;
   const elapsed = useElapsedSeconds(resetKey);
 
   // AI data quality report (fired once on mount)
@@ -268,10 +288,10 @@ export default function CommandCenter() {
         <div className="flex items-center gap-2 text-xs font-mono text-[var(--color-text-muted)]">
           <span
             className={`w-1.5 h-1.5 rounded-full ${
-              summaryLoading ? 'bg-[var(--color-warning)] animate-pulse' : 'bg-[var(--color-success)]'
+              summaryLoading ? 'bg-[var(--color-warning)] animate-pulse' : connected ? 'bg-[var(--color-success)] animate-pulse' : 'bg-[var(--color-danger)]'
             }`}
           />
-          {summaryLoading ? 'Fetching...' : `Updated ${elapsed}s ago`}
+          {summaryLoading ? 'Fetching...' : connected ? `Live · ${elapsed}s since last event` : 'Reconnecting...'}
         </div>
       </div>
 
@@ -355,7 +375,10 @@ export default function CommandCenter() {
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                  <span className="font-mono font-bold text-2xl text-[var(--color-text-primary)]">
+                  <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">
+                    {summaryLoading ? 'Fetching...' : connected ? `Live · ${elapsed}s since last event` : 'Reconnecting...'}
+                  </span>
+                  <span className="font-mono font-bold text-4xl text-[var(--color-text-primary)] mt-1" style={{ color: 'var(--color-accent-primary)' }}>
                     {totalDecisions.toLocaleString()}
                   </span>
                   <span className="font-mono text-[9px] uppercase tracking-widest text-[var(--color-text-muted)] mt-0.5">
@@ -384,6 +407,38 @@ export default function CommandCenter() {
                 ))}
               </div>
             </div>
+          )}
+        </div>
+      </div>
+
+      <div className="panel-border rounded-xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="font-mono text-xs uppercase tracking-widest text-[var(--color-text-muted)]">
+              Live Event Feed
+            </h2>
+            <p className="text-[11px] font-mono text-[var(--color-text-muted)] mt-1">
+              WebSocket events powering the live counters above
+            </p>
+          </div>
+          <span className={`text-[10px] font-mono uppercase tracking-widest ${connected ? 'text-[var(--color-success)]' : 'text-[var(--color-warning)]'}`}>
+            {connected ? 'Connected' : 'Connecting'}
+          </span>
+        </div>
+        <div className="max-h-[260px] overflow-y-auto pr-2">
+          {recentEvents.length === 0 ? (
+            <div className="py-8 text-center text-[var(--color-text-muted)] font-mono text-sm">
+              Waiting for live updates...
+            </div>
+          ) : (
+            recentEvents.map((event, index) => (
+              <LiveEventRow
+                key={`${event.type}-${event.timestamp ?? event.ts ?? index}`}
+                type={event.type}
+                message={event.message}
+                ts={event.timestamp ?? event.ts}
+              />
+            ))
           )}
         </div>
       </div>

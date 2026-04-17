@@ -5,7 +5,7 @@ import { ConfidenceBar } from '@/components/ui/ConfidenceBar';
 import { useToast } from '@/components/ui/Toast';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const toScore = (value: number | undefined) => Math.round((value ?? 0) * 100);
+const toScore = (value: number | undefined) => Math.round(value ?? 0);
 
 export default function ReviewQueue() {
     const [queue, setQueue] = useState<any[]>([]);

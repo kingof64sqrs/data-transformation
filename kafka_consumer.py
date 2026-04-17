@@ -17,10 +17,12 @@ class BronzeConsumer:
         bootstrap_servers: str = "localhost:9092",
         topic: str = "customer_raw",
         group_id: str = "bronze-group",
+        consumer_timeout_ms: int = 5000,
     ) -> None:
         self.topic = topic
         self.group_id = group_id
         self.bootstrap_servers = bootstrap_servers
+        self.consumer_timeout_ms = consumer_timeout_ms
         self.consumer: KafkaConsumer | None = None
         self.connect()
 
@@ -36,7 +38,7 @@ class BronzeConsumer:
                     value_deserializer=lambda m: json.loads(m.decode("utf-8")),
                     auto_offset_reset="earliest",
                     enable_auto_commit=False,
-                    consumer_timeout_ms=5000,
+                    consumer_timeout_ms=self.consumer_timeout_ms,
                     max_poll_records=500,
                 )
                 print(f"Connected to Kafka at {self.bootstrap_servers}")
@@ -49,7 +51,20 @@ class BronzeConsumer:
 
     @staticmethod
     def _bronze_row(event: dict[str, Any], offset: int, partition: int) -> dict[str, Any]:
-        payload = event["payload"]
+        payload = event.get("payload", {})
+        fields = ["cust_id", "first_nm", "last_nm", "email_addr", "phone_num", "birth_dt", "addr_line1", "addr_city", "addr_state"]
+        present = [field for field in fields if str(payload.get(field) or "").strip()]
+        raw_completeness = round(len(present) / len(fields) * 100, 1) if fields else 0.0
+
+        format_validity = {
+            "email": bool(payload.get("email_addr") and "@" in str(payload.get("email_addr"))),
+            "phone": bool(payload.get("phone_num") and len("".join(ch for ch in str(payload.get("phone_num")) if ch.isdigit())) >= 7),
+            "birth_date": bool(payload.get("birth_dt")),
+            "first_name": bool(str(payload.get("first_nm") or "").strip()),
+            "last_name": bool(str(payload.get("last_nm") or "").strip()),
+        }
+
+        dlq_flag = not present or raw_completeness == 0.0
         return {
             "cust_id": payload["cust_id"],
             "first_nm": payload.get("first_nm"),
@@ -64,6 +79,11 @@ class BronzeConsumer:
             "kafka_offset": offset,
             "kafka_partition": partition,
             "raw_json": json.dumps(payload),
+            "raw_completeness": raw_completeness,
+            "format_validity": json.dumps(format_validity),
+            "schema_version": str(event.get("schema_version") or "2.0"),
+            "dlq_flag": 1 if dlq_flag else 0,
+            "dlq_reason": "no recognizable fields" if dlq_flag else None,
         }
 
     def consume_and_store(self, max_messages: int | None = None) -> int:

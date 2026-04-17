@@ -46,7 +46,7 @@ class GoldenRecordMerger:
 
         approved_pairs = db.fetch_all(
             """
-            SELECT silver_id_a, silver_id_b, ai_score
+            SELECT silver_id_a, silver_id_b, COALESCE(final_score, ai_score) AS final_score
             FROM duplicate_matches
             WHERE decision IN ('AUTO_MERGE', 'APPROVED')
             """
@@ -82,7 +82,7 @@ class GoldenRecordMerger:
             if len(group) > 1:
                 score_rows = db.fetch_all(
                     f"""
-                    SELECT ai_score FROM duplicate_matches
+                    SELECT COALESCE(final_score, ai_score) AS final_score FROM duplicate_matches
                     WHERE decision IN ('AUTO_MERGE', 'APPROVED')
                     AND silver_id_a IN ({','.join(['?'] * len(group))})
                     AND silver_id_b IN ({','.join(['?'] * len(group))})
@@ -90,11 +90,19 @@ class GoldenRecordMerger:
                     tuple(group) + tuple(group),
                 )
                 confidence = round(
-                    sum(float(r["ai_score"] or 0.0) for r in score_rows) / max(1, len(score_rows)),
+                    sum(float(r["final_score"] or 0.0) for r in score_rows) / max(1, len(score_rows)),
                     1,
                 )
             else:
                 confidence = 100.0
+
+            quality_values = []
+            for row in silver_rows:
+                try:
+                    quality_values.append(float(row.get("completeness") or 0.0))
+                except (TypeError, ValueError):
+                    quality_values.append(0.0)
+            record_quality = round(sum(quality_values) / max(1, len(quality_values)), 1)
 
             db.insert_record(
                 "gold_customer",
@@ -110,6 +118,9 @@ class GoldenRecordMerger:
                     "source_systems": source_systems,
                     "source_ids": source_ids,
                     "merge_confidence": confidence,
+                    "record_quality_score": record_quality,
+                    "survivorship_log": json.dumps({"rule": "most_recent_valid"}),
+                    "last_reeval_at": None,
                 },
             )
             created += 1
@@ -133,6 +144,9 @@ class GoldenRecordMerger:
                     "source_systems": [row.get("source_system")] if row.get("source_system") else [],
                     "source_ids": [row.get("cust_id")] if row.get("cust_id") else [],
                     "merge_confidence": 100.0,
+                    "record_quality_score": float(row.get("completeness") or 0.0),
+                    "survivorship_log": json.dumps({"rule": "singleton"}),
+                    "last_reeval_at": None,
                 },
             )
             created += 1

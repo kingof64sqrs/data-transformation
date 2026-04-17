@@ -13,6 +13,16 @@ export interface SummaryStats {
   pipeline_health: 'healthy' | 'degraded' | 'error';
 }
 
+export interface LiveFeedEvent {
+  type: string;
+  message: string;
+  data: Record<string, unknown>;
+  ts?: string;
+  timestamp?: string;
+  record_id?: string | number | null;
+  summary?: SummaryStats;
+}
+
 export interface VaultRecord {
   vault_id: number;
   cust_id: string;
@@ -46,6 +56,7 @@ export interface MatchSignals {
   phone_score: number;
   name_score: number;
   dob_score: number;
+  city_score?: number;
   address_score: number;
 }
 
@@ -77,6 +88,10 @@ export interface MatchRecord {
   composite_score: number;
   ai_confidence: number;
   ai_reasoning: string;
+  llm_explanation?: string;
+  llm_confidence?: number;
+  final_score?: number;
+  blocking_keys?: string[];
   decision: 'auto_merged' | 'manual_review' | 'decided_separate' | 'pending';
 }
 
@@ -108,9 +123,43 @@ export interface MasterRecord {
   source_ids: string[];
   source_systems: string[];
   confidence_score: number;
+  record_quality_score?: number;
+  llm_summary?: string;
   record_count: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface MasterCorrection {
+  field_name: string;
+  current_value: string;
+  proposed_value: string;
+  confidence: number;
+  source_record_id: string;
+}
+
+export interface MasterCorrectionExample {
+  cust_id: string;
+  raw: {
+    full_name: string;
+    email: string;
+    phone: string;
+    city: string;
+    state: string;
+  };
+  master: {
+    master_id: string;
+    full_name: string;
+    email: string;
+    phone: string;
+    city: string;
+    state: string;
+  };
+  corrections: MasterCorrection[];
+}
+
+export interface MasterCorrectionsPreviewResponse {
+  examples: MasterCorrectionExample[];
 }
 
 export interface PipelineEvent {

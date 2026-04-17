@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from itertools import combinations
+import json
 from typing import Iterable
 
 from rapidfuzz import fuzz
 
 from db_utils import get_db
+from golden_record_platform.utils.score_utils import compute_blocking_keys
 
 
 class DeduplicationEngine:
@@ -17,6 +19,7 @@ class DeduplicationEngine:
     NAME_WEIGHT = 0.20
     DOB_WEIGHT = 0.10
     CITY_WEIGHT = 0.05
+    ADDRESS_WEIGHT = 0.04
 
     CANDIDATE_MIN_SCORE = 0.55
 
@@ -26,12 +29,13 @@ class DeduplicationEngine:
 
     @classmethod
     def _feature_scores(cls, a: dict, b: dict) -> dict:
-        email_match = 1.0 if cls._normalized(a.get("email")) and cls._normalized(a.get("email")) == cls._normalized(b.get("email")) else 0.0
-        phone_match = 1.0 if cls._normalized(a.get("phone")) and cls._normalized(a.get("phone")) == cls._normalized(b.get("phone")) else 0.0
-        dob_match = 1.0 if cls._normalized(a.get("birth_date")) and cls._normalized(a.get("birth_date")) == cls._normalized(b.get("birth_date")) else 0.0
+        email_match = 100.0 if cls._normalized(a.get("email")) and cls._normalized(a.get("email")) == cls._normalized(b.get("email")) else 0.0
+        phone_match = 100.0 if cls._normalized(a.get("phone")) and cls._normalized(a.get("phone")) == cls._normalized(b.get("phone")) else 0.0
+        dob_match = 100.0 if cls._normalized(a.get("birth_date")) and cls._normalized(a.get("birth_date")) == cls._normalized(b.get("birth_date")) else 0.0
 
-        name_similarity = fuzz.token_sort_ratio(a.get("full_name") or "", b.get("full_name") or "") / 100.0
-        city_similarity = fuzz.ratio(a.get("city") or "", b.get("city") or "") / 100.0
+        name_similarity = float(fuzz.token_sort_ratio(a.get("full_name") or "", b.get("full_name") or ""))
+        city_similarity = float(fuzz.ratio(a.get("city") or "", b.get("city") or ""))
+        address_similarity = float(fuzz.token_sort_ratio(a.get("address") or "", b.get("address") or ""))
 
         composite = (
             email_match * cls.EMAIL_WEIGHT
@@ -39,9 +43,11 @@ class DeduplicationEngine:
             + name_similarity * cls.NAME_WEIGHT
             + dob_match * cls.DOB_WEIGHT
             + city_similarity * cls.CITY_WEIGHT
+            + address_similarity * cls.ADDRESS_WEIGHT
         )
 
-        ai_score = round(min(100.0, composite * 100.0 + (5.0 if phone_match and dob_match else 0.0)), 1)
+        ai_score = round(min(100.0, composite + (5.0 if phone_match == 100.0 and dob_match == 100.0 else 0.0)), 1)
+        blocking_keys = sorted(set(compute_blocking_keys(a) + compute_blocking_keys(b)))
 
         if ai_score >= 90:
             reasoning = "High confidence: strong deterministic matches across key identifiers"
@@ -56,9 +62,12 @@ class DeduplicationEngine:
             "name_similarity": round(name_similarity, 3),
             "dob_match": round(dob_match, 3),
             "city_similarity": round(city_similarity, 3),
-            "composite_score": round(composite, 3),
+            "address_similarity": round(address_similarity, 3),
+            "composite_score": round(composite, 2),
             "ai_score": ai_score,
+            "final_score": ai_score,
             "ai_reasoning": reasoning,
+            "blocking_keys": blocking_keys,
         }
 
     @classmethod
@@ -117,15 +126,16 @@ class DeduplicationEngine:
             a = record_by_id[aid]
             b = record_by_id[bid]
             features = cls._feature_scores(a, b)
-            if features["composite_score"] < cls.CANDIDATE_MIN_SCORE:
+            if features["composite_score"] < 55.0:
                 continue
 
             db.execute_query(
                 """
                 INSERT OR IGNORE INTO duplicate_matches (
                     silver_id_a, silver_id_b, email_match, phone_match, name_similarity,
-                    dob_match, city_similarity, composite_score, ai_score, ai_reasoning, decision
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+                    dob_match, city_similarity, address_similarity, composite_score, ai_score,
+                    final_score, ai_reasoning, blocking_keys, decision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
                 """,
                 (
                     aid,
@@ -135,9 +145,12 @@ class DeduplicationEngine:
                     features["name_similarity"],
                     features["dob_match"],
                     features["city_similarity"],
+                    features["address_similarity"],
                     features["composite_score"],
                     features["ai_score"],
+                    features["final_score"],
                     features["ai_reasoning"],
+                    json.dumps(features["blocking_keys"]),
                 ),
             )
 

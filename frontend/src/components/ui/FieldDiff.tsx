@@ -42,10 +42,10 @@ function MatchIndicator({ kind, similarity }: { kind: MatchKind; similarity?: nu
     return (
       <span
         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-mono font-bold uppercase tracking-wider bg-[var(--color-warning)]/10 text-[var(--color-warning)] border border-[var(--color-warning)]/30"
-        title={similarity !== undefined ? `Similarity: ${Math.round(similarity * 100)}%` : 'Fuzzy match'}
+        title={similarity !== undefined ? `Similarity: ${Math.round(similarity)}%` : 'Fuzzy match'}
       >
         <span className="w-1 h-1 rounded-full bg-[var(--color-warning)]" />
-        {similarity !== undefined ? `${Math.round(similarity * 100)}%` : 'Fuzzy'}
+        {similarity !== undefined ? `${Math.round(similarity)}%` : 'Fuzzy'}
       </span>
     );
   }

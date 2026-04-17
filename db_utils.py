@@ -49,6 +49,7 @@ class DatabaseConnection:
         assert self.conn is not None
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._create_tables()
+        self._migrate_schema()
         self._insert_or_expand_mock_data(self.mock_record_count)
 
     def _create_tables(self) -> None:
@@ -94,6 +95,11 @@ class DatabaseConnection:
                 kafka_offset INTEGER,
                 kafka_partition INTEGER,
                 raw_json TEXT,
+                raw_completeness REAL,
+                format_validity TEXT,
+                schema_version TEXT,
+                dlq_flag INTEGER DEFAULT 0,
+                dlq_reason TEXT,
                 ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -118,6 +124,10 @@ class DatabaseConnection:
                 email_valid INTEGER,
                 phone_valid INTEGER,
                 completeness REAL,
+                field_validity_pct REAL,
+                anomaly_flags TEXT,
+                blocking_keys TEXT,
+                normalized_at TEXT,
                 cleaned_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(bronze_id) REFERENCES bronze_customer(bronze_id)
             )
@@ -135,8 +145,13 @@ class DatabaseConnection:
                 name_similarity REAL,
                 dob_match REAL,
                 city_similarity REAL,
+                address_similarity REAL,
                 composite_score REAL,
                 ai_score REAL,
+                final_score REAL,
+                llm_explanation TEXT,
+                llm_confidence REAL,
+                blocking_keys TEXT,
                 ai_reasoning TEXT,
                 decision TEXT DEFAULT 'PENDING',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -177,6 +192,10 @@ class DatabaseConnection:
                 source_systems TEXT,
                 source_ids TEXT NOT NULL,
                 merge_confidence REAL,
+                record_quality_score REAL,
+                llm_summary TEXT,
+                survivorship_log TEXT,
+                last_reeval_at TEXT,
                 merged_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -194,6 +213,23 @@ class DatabaseConnection:
             """
         )
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS correction_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                master_id TEXT NOT NULL,
+                field_name TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                applied_by TEXT,
+                applied_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                llm_rationale TEXT,
+                confidence REAL,
+                FOREIGN KEY(master_id) REFERENCES gold_customer(golden_id)
+            )
+            """
+        )
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_db2_phone ON db2_customer_simulated(phone_num)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_db2_email ON db2_customer_simulated(email_addr)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_bronze_cust ON bronze_customer(cust_id)")
@@ -201,6 +237,8 @@ class DatabaseConnection:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_silver_email ON silver_customer(email)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_match_decision ON duplicate_matches(decision)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_review_status ON review_queue(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gold_confidence ON gold_customer(merge_confidence)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_correction_history_master ON correction_history(master_id, applied_at DESC)")
 
         self.conn.commit()
 
@@ -212,32 +250,60 @@ class DatabaseConnection:
         return row is not None
 
     def _column_exists(self, table_name: str, column_name: str) -> bool:
-        assert self.conn is not None
         rows = self.fetch_all(f"PRAGMA table_info({table_name})")
         return any(row.get("name") == column_name for row in rows)
 
+    def _add_column_if_missing(self, table_name: str, column_name: str, column_sql: str) -> None:
+        assert self.conn is not None
+        if self._column_exists(table_name, column_name):
+            return
+        self.conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
     def _requires_rebuild(self) -> bool:
-        # Rebuild if old schema exists.
-        if self._table_exists("db2_customer_simulated") and not self._column_exists(
-            "db2_customer_simulated", "phone_num"
-        ):
+        if self._table_exists("db2_customer_simulated") and not self._column_exists("db2_customer_simulated", "phone_num"):
             return True
-
-        if self._table_exists("silver_customer") and not self._column_exists(
-            "silver_customer", "full_name"
-        ):
+        if self._table_exists("silver_customer") and not self._column_exists("silver_customer", "full_name"):
             return True
-
-        if self._table_exists("duplicate_matches") and not self._column_exists(
-            "duplicate_matches", "composite_score"
-        ):
+        if self._table_exists("duplicate_matches") and not self._column_exists("duplicate_matches", "composite_score"):
             return True
-
         return False
+
+    def _migrate_schema(self) -> None:
+        assert self.conn is not None
+
+        if self._table_exists("bronze_customer"):
+            self._add_column_if_missing("bronze_customer", "raw_completeness", "REAL")
+            self._add_column_if_missing("bronze_customer", "format_validity", "TEXT")
+            self._add_column_if_missing("bronze_customer", "schema_version", "TEXT")
+            self._add_column_if_missing("bronze_customer", "source_system", "TEXT")
+            self._add_column_if_missing("bronze_customer", "dlq_flag", "INTEGER DEFAULT 0")
+            self._add_column_if_missing("bronze_customer", "dlq_reason", "TEXT")
+
+        if self._table_exists("silver_customer"):
+            self._add_column_if_missing("silver_customer", "field_validity_pct", "REAL")
+            self._add_column_if_missing("silver_customer", "anomaly_flags", "TEXT")
+            self._add_column_if_missing("silver_customer", "blocking_keys", "TEXT")
+            self._add_column_if_missing("silver_customer", "normalized_at", "TEXT")
+
+        if self._table_exists("duplicate_matches"):
+            self._add_column_if_missing("duplicate_matches", "address_similarity", "REAL")
+            self._add_column_if_missing("duplicate_matches", "llm_explanation", "TEXT")
+            self._add_column_if_missing("duplicate_matches", "llm_confidence", "REAL")
+            self._add_column_if_missing("duplicate_matches", "final_score", "REAL")
+            self._add_column_if_missing("duplicate_matches", "blocking_keys", "TEXT")
+
+        if self._table_exists("gold_customer"):
+            self._add_column_if_missing("gold_customer", "llm_summary", "TEXT")
+            self._add_column_if_missing("gold_customer", "record_quality_score", "REAL")
+            self._add_column_if_missing("gold_customer", "survivorship_log", "TEXT")
+            self._add_column_if_missing("gold_customer", "last_reeval_at", "TEXT")
+
+        self.conn.commit()
 
     def _drop_pipeline_tables(self) -> None:
         assert self.conn is not None
         cursor = self.conn.cursor()
+        cursor.execute("DROP TABLE IF EXISTS correction_history")
         cursor.execute("DROP TABLE IF EXISTS review_queue")
         cursor.execute("DROP TABLE IF EXISTS duplicate_matches")
         cursor.execute("DROP TABLE IF EXISTS silver_customer")
@@ -248,7 +314,8 @@ class DatabaseConnection:
         self.conn.commit()
 
     def _insert_or_expand_mock_data(self, target_count: int) -> None:
-        current_count = self.fetch_one("SELECT COUNT(*) AS c FROM db2_customer_simulated")["c"]
+        current_row = self.fetch_one("SELECT COUNT(*) AS c FROM db2_customer_simulated")
+        current_count = int(current_row["c"] if current_row else 0)
         if current_count >= target_count:
             print(f"Mock DB2 already has {current_count} records")
             return
@@ -318,8 +385,7 @@ class DatabaseConnection:
             fn = rng.choice(first_names)
             ln = rng.choice(last_names)
             city, state = rng.choice(cities)
-            local = f"{fn}.{ln}".lower().replace(" ", "")
-            local = local.replace("-", "")
+            local = f"{fn}.{ln}".lower().replace(" ", "").replace("-", "")
             domain = rng.choice(["gmail.com", "outlook.com", "company.ae", "corp.org"])
             email = f"{local}{rng.randint(1, 9999)}@{domain}"
             phone = self._make_phone(rng)
@@ -328,7 +394,6 @@ class DatabaseConnection:
             base_people.append(MockPerson(fn, ln, email, phone, birth, address, city, state))
 
         people: list[MockPerson] = list(base_people)
-
         while len(people) < record_count:
             base = rng.choice(base_people)
             people.append(self._mutate_person(base, rng))
@@ -393,6 +458,7 @@ class DatabaseConnection:
         cursor.execute("PRAGMA foreign_keys = OFF")
         cursor.execute("DELETE FROM review_queue")
         cursor.execute("DELETE FROM duplicate_matches")
+        cursor.execute("DELETE FROM correction_history")
         cursor.execute("DELETE FROM gold_customer")
         cursor.execute("DELETE FROM silver_customer")
         cursor.execute("DELETE FROM bronze_customer")

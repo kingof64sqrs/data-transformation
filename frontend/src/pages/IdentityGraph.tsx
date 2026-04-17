@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { LayoutGrid, List, Filter, ChevronRight, TrendingUp } from 'lucide-react';
+import { LayoutGrid, List, ChevronRight } from 'lucide-react';
 import api from '@/api/client';
 import type { MatchRecord, IdentityStats } from '@/types/api';
 import { Skeleton } from '@/components/ui/Skeleton';
@@ -38,11 +38,10 @@ export default function IdentityGraph() {
     staleTime: 60_000,
   });
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading } = useQuery<{ matches: MatchRecord[]; total: number }>({
     queryKey: ['identity-graph', activeTab, offset],
     queryFn: () =>
       api.get('/identity/graph', { params: { limit, offset, decision: activeTab } }).then(r => r.data),
-    keepPreviousData: true,
   });
 
   const matches: MatchRecord[] = data?.matches ?? [];
@@ -164,9 +163,9 @@ export default function IdentityGraph() {
                     </div>
                     <div className="space-y-1 mb-3">
                       {[
-                        ['Email', m.signals.email_score * 100],
-                        ['Phone', m.signals.phone_score * 100],
-                        ['Name', m.signals.name_score * 100],
+                        ['Email', m.signals.email_score],
+                        ['Phone', m.signals.phone_score],
+                        ['Name', m.signals.name_score],
                       ].map(([label, val]) => (
                         <div key={label as string} className="flex items-center gap-2">
                           <span className="text-[10px] text-[var(--color-text-muted)] w-10 shrink-0">{label}</span>
@@ -239,7 +238,7 @@ export default function IdentityGraph() {
       )}
 
       {/* Side Panel */}
-      <SidePanel open={!!selected} onClose={() => setSelected(null)} title={`Match #${selected?.match_id} — Detail`}>
+      <SidePanel isOpen={!!selected} onClose={() => setSelected(null)} title={`Match #${selected?.match_id} — Detail`}>
         {selected && (
           <div className="space-y-5">
             <div className="flex items-center gap-3">
@@ -253,7 +252,7 @@ export default function IdentityGraph() {
             </div>
             <div>
               <div className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide mb-2">Signal Breakdown</div>
-              <SignalBreakdown signals={selected.signals} compositeScore={selected.composite_score} aiConfidence={selected.ai_confidence} />
+              <SignalBreakdown signals={selected.signals} composite_score={selected.composite_score} ai_confidence={selected.ai_confidence} />
             </div>
             {selected.ai_reasoning && (
               <div>

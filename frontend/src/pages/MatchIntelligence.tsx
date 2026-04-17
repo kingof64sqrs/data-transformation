@@ -52,7 +52,7 @@ export default function MatchIntelligence() {
     const generateSignals = (m: any): MatchSignal[] => {
         // Backend doesn't strictly give component scores in typical /matches output unless modified
         // We will simulate the signals if omitted for the UI demo aspect
-        const base = Math.round((m.confidence_score ?? 0) * 100);
+        const base = Math.round(m.confidence_score ?? 0);
         return [
             { name: "Name Fuzzy Match", score: Math.round(base * 0.9) },
             { name: "Email Match", score: Math.round(base * 1.05 > 100 ? 100 : base * 1.05) },
@@ -88,7 +88,7 @@ export default function MatchIntelligence() {
                                 key={translateMatchId(match)}
                                 matchId={translateMatchId(match)}
                                 status={match.decision === 'auto_merged' ? 'auto-merged' : (match.decision === 'decided_separate' ? 'rejected' : 'pending')}
-                                confidence={Math.round((match.confidence_score ?? 0) * 100)}
+                                confidence={Math.round(match.confidence_score ?? 0)}
                                 recordA={transformRecordData(match.record1)}
                                 recordB={transformRecordData(match.record2)}
                                 signals={generateSignals(match)}
