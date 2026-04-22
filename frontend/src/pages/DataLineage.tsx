@@ -33,7 +33,7 @@ const STAGE_META: Record<
   source: { label: 'Source', icon: '⬡', color: 'var(--color-accent-primary)' },
   vault: { label: 'Raw Vault', icon: '⬢', color: 'var(--color-warning)' },
   canonical: { label: 'Canonical', icon: '◈', color: 'var(--color-accent-secondary)' },
-  identity: { label: 'Identity Graph', icon: '⬟', color: '#EC4899' },
+  identity: { label: 'Identity Resolution', icon: '⬟', color: '#EC4899' },
   master: { label: 'Master Record', icon: '★', color: 'var(--color-success)' },
 };
 
@@ -218,12 +218,25 @@ export default function DataLineage() {
     const width = Math.max(clientWidth, 800) - margin.left - margin.right;
     const height = Math.max(clientHeight, 500) - margin.top - margin.bottom;
 
-    const matchDecisionNodes = (lineage.matches || []).map((m: any) => ({
-      name: m.partner_name || m.partner_cust_id || m.match_id,
-      type: m.decision === 'auto_merged' ? 'status_success' : m.decision === 'decided_separate' ? 'status_danger' : 'status_warn',
-      subtitle: `Score: ${Math.round(m.composite_score || 0)}%`,
-      children: m.decision === 'auto_merged' ? [{ name: 'Master Record', type: 'gold', subtitle: 'Resolved' }] : []
-    }));
+    const matchDecisionNodes = (lineage.matches || []).map((m: any) => {
+      const decisionLabel =
+        m.decision === 'auto_merged'
+          ? 'Auto-merged match'
+          : m.decision === 'manual_review'
+            ? 'Needs review'
+            : 'Rejected match';
+
+      return {
+        name: m.partner_name || m.partner_cust_id || `Match #${m.match_id}`,
+        type:
+          m.decision === 'auto_merged'
+            ? 'status_success'
+            : m.decision === 'decided_separate'
+              ? 'status_danger'
+              : 'status_warn',
+        subtitle: `${decisionLabel} · Score: ${Math.round(m.composite_score || 0)}%`,
+      };
+    });
 
     const treeData = {
       name: 'Source DB',
@@ -241,11 +254,13 @@ export default function DataLineage() {
             {
               name: 'Identity Matching',
               type: 'decision',
-              subtitle: `${(lineage.matches || []).length} branches`,
-              children: [
-                { name: 'Self-Resolution', type: 'decision', children: [{ name: 'Master Record', type: 'gold', subtitle: 'Primary Profile' }] },
-                ...matchDecisionNodes
-              ]
+              subtitle:
+                lineage.matches && lineage.matches.length > 0
+                  ? `${lineage.matches.length} candidate match${lineage.matches.length === 1 ? '' : 'es'}${lineage.master ? ' · master resolved' : ''}`
+                  : lineage.master
+                    ? 'Directly resolved to a master record'
+                    : 'No match candidates',
+              children: matchDecisionNodes
             }
           ]
         }]
@@ -585,7 +600,7 @@ export default function DataLineage() {
                   Lineage Graph
                 </p>
                 <p className="font-mono text-[10px] text-[var(--color-text-muted)]">
-                  Source to master lineage map with identity branches.
+                  Source to master lineage map with candidate matches and final resolution.
                 </p>
               </div>
               <div className="flex items-center gap-2">

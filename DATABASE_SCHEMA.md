@@ -35,6 +35,10 @@ AUDIT & CORRECTION LAYER
 OPERATIONAL LAYER
     │
     └─→ kafka_offsets  (Kafka consumer progress tracking)
+
+CACHE LAYER
+  │
+  └─→ column_profiles  (Persisted column profile cards for Records view)
 ```
 
 ---
@@ -222,6 +226,22 @@ OPERATIONAL LAYER
 | `partition` (PK) | INTEGER | Kafka partition |
 | `offset` | INTEGER | Current offset |
 | `updated_at` | TEXT | Last update |
+
+---
+
+### 9️⃣ **column_profiles** (CACHE)
+**Purpose:** Persist column profiling results for quick reuse in the Records view
+**No Foreign Keys** (cached metadata)
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `profile_id` (PK) | INTEGER | Auto-increment |
+| `layer` | TEXT | db2, bronze, silver, or gold |
+| `table_name` | TEXT | Underlying table name |
+| `column_name` | TEXT | Profiled column |
+| `row_count` | INTEGER | Table row count when cached |
+| `profile_json` | TEXT | Serialized profile payload |
+| `generated_at` | TEXT | Cache timestamp |
 
 ---
 

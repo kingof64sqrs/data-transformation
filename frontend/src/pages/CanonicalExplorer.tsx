@@ -18,6 +18,7 @@ import { SidePanel } from '@/components/ui/SidePanel';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { ConfidenceBar } from '@/components/ui/ConfidenceBar';
 import { LayerKPIStats } from '@/components/ui/LayerKPIStats';
+import { ColumnProfileStrip } from '@/components/ui/ColumnProfileStrip';
 import type { CanonicalRecord, CanonicalStats } from '@/types/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -363,6 +364,13 @@ export default function CanonicalExplorer() {
 
       {/* ── Layer Quality KPIs ── */}
         <LayerKPIStats layerName="Canonical Layer" layerId={2} />
+
+      {/* ── Column Profile ── */}
+      <ColumnProfileStrip
+        layer="silver"
+        title="Canonical Layer Column Profile"
+        description="Silver layer profiling and chart suggestions for all canonical columns."
+      />
 
       {/* ── Quality Issues Banner ── */}
       <AnimatePresence>

@@ -15,8 +15,13 @@ import { SidePanel } from '@/components/ui/SidePanel';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { LayerKPIStats } from '@/components/ui/LayerKPIStats';
+import { ColumnProfileStrip } from '@/components/ui/ColumnProfileStrip';
 import { useToast } from '@/components/ui/Toast';
-import type { MasterCorrectionExample, MasterRecord } from '@/types/api';
+import type {
+  MasterCorrectionExample,
+  MasterRecord,
+  MasterRecordDetailResponse,
+} from '@/types/api';
 import { cn } from '@/lib/utils';
 
 interface MasterStats {
@@ -95,6 +100,24 @@ function RecordDetail({
   const { toast } = useToast();
   const [explainLoading, setExplainLoading] = useState(false);
   const [explanation, setExplanation] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detail, setDetail] = useState<MasterRecordDetailResponse | null>(null);
+
+  useEffect(() => {
+    const loadDetail = async () => {
+      setDetailLoading(true);
+      try {
+        const res = await api.get<MasterRecordDetailResponse>(`/master/records/${record.master_id}/detail`);
+        setDetail(res.data);
+      } catch {
+        setDetail(null);
+        toast('Unable to load full merge details', 'error');
+      } finally {
+        setDetailLoading(false);
+      }
+    };
+    loadDetail();
+  }, [record.master_id, toast]);
 
   const explain = async () => {
     setExplainLoading(true);
@@ -194,6 +217,111 @@ function RecordDetail({
           </div>
         </div>
       )}
+
+      {/* Table-wise merged evidence */}
+      <div className="panel-border rounded-xl p-4 space-y-4">
+        <p className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">
+          Merge Evidence Across Tables
+        </p>
+
+        {detailLoading ? (
+          <div className="space-y-2">
+            <Skeleton className="h-3.5 w-full rounded" />
+            <Skeleton className="h-3.5 w-5/6 rounded" />
+            <Skeleton className="h-3.5 w-2/3 rounded" />
+          </div>
+        ) : !detail ? (
+          <p className="text-xs font-mono text-[var(--color-text-muted)] italic">No table-wise detail available.</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/40 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">DB2/Sources</p>
+                <p className="text-[var(--color-text-primary)] mt-1">{detail.source_records.filter((r) => !!r.source).length}</p>
+              </div>
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/40 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">Bronze Vault</p>
+                <p className="text-[var(--color-text-primary)] mt-1">{detail.source_records.filter((r) => !!r.vault).length}</p>
+              </div>
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/40 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">Silver Canonical</p>
+                <p className="text-[var(--color-text-primary)] mt-1">{detail.source_records.filter((r) => !!r.canonical).length}</p>
+              </div>
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/40 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">Identity Matches</p>
+                <p className="text-[var(--color-text-primary)] mt-1">{detail.match_records.length}</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <p className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">
+                Source Differences (DB2 vs Bronze vs Silver)
+              </p>
+              {detail.source_records.map((src) => {
+                const sourceName = ((src.source?.first_nm as string) || '') + ' ' + ((src.source?.last_nm as string) || '');
+                const canonicalName = (src.canonical?.full_name as string) || '';
+                const sourceEmail = (src.source?.email_addr as string) || '';
+                const canonicalEmail = (src.canonical?.email as string) || '';
+                const sourcePhone = (src.source?.phone_num as string) || '';
+                const canonicalPhone = (src.canonical?.phone as string) || '';
+
+                return (
+                  <div key={src.cust_id} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/30 px-3 py-2">
+                    <p className="text-xs font-mono text-[var(--color-text-primary)]">
+                      {src.cust_id} {src.source_system ? `(${src.source_system})` : ''}
+                    </p>
+                    <div className="mt-1 space-y-1 text-[11px] font-mono text-[var(--color-text-secondary)]">
+                      <p>DB2 name: <span className="text-[var(--color-text-primary)]">{sourceName.trim() || '—'}</span></p>
+                      <p>Silver name: <span className="text-[var(--color-accent-secondary)]">{canonicalName || '—'}</span></p>
+                      <p>DB2 email: <span className="text-[var(--color-text-primary)]">{sourceEmail || '—'}</span></p>
+                      <p>Silver email: <span className="text-[var(--color-accent-secondary)]">{canonicalEmail || '—'}</span></p>
+                      <p>DB2 phone: <span className="text-[var(--color-text-primary)]">{sourcePhone || '—'}</span></p>
+                      <p>Silver phone: <span className="text-[var(--color-accent-secondary)]">{canonicalPhone || '—'}</span></p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {detail.match_records.length > 0 && (
+              <div className="space-y-2">
+                <p className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">
+                  Identity Match Records
+                </p>
+                <div className="space-y-1">
+                  {detail.match_records.slice(0, 8).map((m) => (
+                    <div key={m.match_id} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/30 px-3 py-2 text-[11px] font-mono text-[var(--color-text-secondary)]">
+                      <p>
+                        Match #{m.match_id} · {m.source_a_cust_id} vs {m.source_b_cust_id}
+                      </p>
+                      <p>
+                        Final: <span className="text-[var(--color-accent-secondary)]">{Math.round(m.final_score ?? m.ai_score ?? 0)}%</span>
+                        {' '}· Decision: <span className="text-[var(--color-text-primary)]">{m.decision || 'PENDING'}</span>
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {detail.corrections.length > 0 && (
+              <div className="space-y-2">
+                <p className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">
+                  Correction History
+                </p>
+                {detail.corrections.slice(0, 6).map((c) => (
+                  <div key={c.id} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/30 px-3 py-2 text-[11px] font-mono text-[var(--color-text-secondary)]">
+                    <p>
+                      {c.field_name}: <span className="text-[var(--color-text-primary)]">{c.old_value || '—'}</span> → <span className="text-[var(--color-accent-secondary)]">{c.new_value || '—'}</span>
+                    </p>
+                    <p>By {c.applied_by || 'USER'} at {c.applied_at || '—'}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       {/* Explain merge */}
       <div className="panel-border rounded-xl p-4 bg-gradient-to-br from-[var(--color-accent-secondary)]/8 via-[var(--color-surface-1)] to-[var(--color-surface-1)] border-[var(--color-accent-secondary)]/25">
@@ -480,6 +608,13 @@ export default function MasterRecords() {
 
       {/* ── Layer Quality KPIs ── */}
       <LayerKPIStats layerName="Master Records" layerId={4} />
+
+      {/* ── Column Profile ── */}
+      <ColumnProfileStrip
+        layer="gold"
+        title="Master Records Column Profile"
+        description="Gold layer profiling and chart suggestions for all master record columns."
+      />
 
       {/* ── Correction Preview ── */}
       <div className="panel-border rounded-xl p-5 space-y-4">

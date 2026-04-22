@@ -13,6 +13,46 @@ export interface SummaryStats {
   pipeline_health: 'healthy' | 'degraded' | 'error';
 }
 
+export interface ColumnProfileBucket {
+  label: string;
+  count: number;
+  pct: number;
+}
+
+export interface ColumnProfile {
+  name: string;
+  label: string;
+  sqlite_type: string;
+  semantic_type: 'numeric' | 'date' | 'categorical' | 'boolean' | 'identifier' | 'text';
+  chart_type: 'histogram' | 'bar' | 'donut' | 'trend' | 'stat';
+  title?: string;
+  summary: string;
+  reason: string;
+  null_count: number;
+  null_pct: number;
+  distinct_count: number;
+  coverage_pct: number;
+  min?: number | string | null;
+  max?: number | string | null;
+  mean?: number | null;
+  examples: string[];
+  distribution: ColumnProfileBucket[];
+  top_values: ColumnProfileBucket[];
+  show_graph?: boolean;
+  priority?: number;
+}
+
+export interface RecordsProfileResponse {
+  layer: string;
+  table_name: string;
+  row_count: number;
+  sample_size: number;
+  generated_at: string;
+  ai_used: boolean;
+  from_cache?: boolean;
+  columns: ColumnProfile[];
+}
+
 export interface LiveFeedEvent {
   type: string;
   message: string;
@@ -160,6 +200,50 @@ export interface MasterCorrectionExample {
     state: string;
   };
   corrections: MasterCorrection[];
+}
+
+export interface MasterSourceRecordDetail {
+  cust_id: string;
+  source_system?: string;
+  source: Record<string, unknown> | null;
+  vault: Record<string, unknown> | null;
+  canonical: Record<string, unknown> | null;
+}
+
+export interface MasterMatchRecordDetail {
+  match_id: number;
+  silver_id_a: number;
+  silver_id_b: number;
+  email_match?: number;
+  phone_match?: number;
+  name_similarity?: number;
+  dob_match?: number;
+  city_similarity?: number;
+  address_similarity?: number;
+  final_score?: number;
+  ai_score?: number;
+  decision?: string;
+  created_at?: string;
+  source_a_cust_id?: string;
+  source_b_cust_id?: string;
+}
+
+export interface MasterRecordCorrectionHistory {
+  id: number;
+  master_id: string;
+  field_name: string;
+  old_value: string;
+  new_value: string;
+  applied_by: string;
+  applied_at: string;
+  confidence?: number;
+}
+
+export interface MasterRecordDetailResponse {
+  master: MasterRecord;
+  source_records: MasterSourceRecordDetail[];
+  match_records: MasterMatchRecordDetail[];
+  corrections: MasterRecordCorrectionHistory[];
 }
 
 export interface MasterCorrectionsPreviewResponse {

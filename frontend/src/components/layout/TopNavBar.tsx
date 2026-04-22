@@ -82,7 +82,6 @@ const TopNavBar = () => {
         <header className="h-[60px] bg-[var(--color-surface-2)] border-b border-[var(--color-border)] flex items-center justify-between px-6 shrink-0 relative z-10 box-shadow-[0_4px_20px_rgba(0,0,0,0.3)] transition-colors backdrop-blur-2xl backdrop-filter">
             {/* Logo Area */}
             <div className="flex items-center gap-2 text-xl font-mono font-bold text-[var(--color-text-primary)]">
-                <span className="text-[var(--color-accent-primary)]">◈</span> GOLDNREC
             </div>
 
             {/* Center - Data Source Status */}

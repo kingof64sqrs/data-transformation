@@ -1,12 +1,14 @@
 import React, { useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Database, RefreshCw, Search, ChevronRight, Lock, X } from 'lucide-react';
+import { Database, RefreshCw, Search, ChevronRight, Lock, X, BarChart3, Hash, Activity, CircleDot, TrendingUp } from 'lucide-react';
 import api from '@/api/client';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { SidePanel } from '@/components/ui/SidePanel';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { LayerKPIStats } from '@/components/ui/LayerKPIStats';
+import { HoverTooltip } from '@/components/ui/HoverTooltip';
+import { ColumnProfileStrip } from '@/components/ui/ColumnProfileStrip';
 import type { VaultRecord } from '@/types/api';
 
 interface VaultRecordsResponse {
@@ -15,6 +17,19 @@ interface VaultRecordsResponse {
   offset: number;
   limit: number;
 }
+
+const HEADER_HELP: Record<string, string> = {
+  'Vault ID': 'Unique immutable ID for this bronze (raw vault) event row.',
+  'Customer ID': 'Original source customer identifier from upstream system.',
+  Source: 'Source system that produced this event (CRM, ERP2, AS4K, etc.).',
+  Completeness: 'Raw completeness percentage from ingestion quality checks.',
+  Validity: 'Format validity percentage across validated fields in this row.',
+  Correctness:
+    'Derived quality score = (Completeness × 55%) + (Validity × 45%) - DLQ penalty (30 if flagged).',
+  Invalid: 'Count of fields that failed format validity checks.',
+  DLQ: 'Dead-letter queue indicator. Y means event had ingestion/validation issue.',
+  'Ingested At': 'Timestamp when the event was written into the raw vault.',
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -84,6 +99,15 @@ function correctnessScore(record: VaultRecord): number {
   return Math.max(0, Math.min(100, score));
 }
 
+function correctnessBreakdown(record: VaultRecord): string {
+  const completeness = Number(record.raw_completeness ?? 0);
+  const validity = validityStats(record.format_validity).pct;
+  const dlqPenalty = record.dlq_flag ? 30 : 0;
+  const weighted = completeness * 0.55 + validity * 0.45 - dlqPenalty;
+  const final = Math.max(0, Math.min(100, Math.round(weighted)));
+  return `Correctness ${final}% = (${Math.round(completeness)} x 0.55) + (${validity} x 0.45) - ${dlqPenalty} DLQ penalty`;
+}
+
 // ─── Skeleton Rows ────────────────────────────────────────────────────────────
 
 const TableSkeletonRows: React.FC<{ count?: number }> = ({ count = 8 }) => (
@@ -100,12 +124,128 @@ const TableSkeletonRows: React.FC<{ count?: number }> = ({ count = 8 }) => (
   </>
 );
 
+const ProfileSkeletonCards: React.FC<{ count?: number }> = ({ count = 4 }) => (
+  <div className="flex gap-4 overflow-hidden pb-1">
+    {Array.from({ length: count }).map((_, i) => (
+      <div key={i} className="panel-border rounded-xl p-4 w-[280px] shrink-0 space-y-3">
+        <div className="h-4 w-32 rounded bg-[var(--color-surface-2)] animate-pulse" />
+        <div className="h-24 rounded-lg bg-[var(--color-surface-2)]/40 animate-pulse" />
+        <div className="grid grid-cols-3 gap-2">
+          <div className="h-12 rounded-lg bg-[var(--color-surface-2)]/30 animate-pulse" />
+          <div className="h-12 rounded-lg bg-[var(--color-surface-2)]/30 animate-pulse" />
+          <div className="h-12 rounded-lg bg-[var(--color-surface-2)]/30 animate-pulse" />
+        </div>
+      </div>
+    ))}
+  </div>
+);
+
+const profileIcon = (chartType: ColumnProfile['chart_type']) => {
+  if (chartType === 'histogram' || chartType === 'trend') return TrendingUp;
+  if (chartType === 'bar') return BarChart3;
+  if (chartType === 'donut') return CircleDot;
+  if (chartType === 'stat') return Hash;
+  return Activity;
+};
+
+const renderProfileChart = (profile: ColumnProfile) => {
+  const chartType = profile.chart_type;
+  if (chartType === 'stat' || profile.show_graph === false) {
+    return (
+      <div className="h-24 flex flex-col justify-center items-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/20 px-3 text-center">
+        <div className="text-2xl font-bold text-[var(--color-text-primary)]">{profile.distinct_count.toLocaleString()}</div>
+        <div className="text-[10px] uppercase tracking-widest text-[var(--color-text-muted)]">unique values</div>
+        <div className="mt-2 flex flex-wrap gap-1 justify-center">
+          {profile.examples.slice(0, 3).map((example) => (
+            <span key={`${profile.name}-${example}`} className="px-1.5 py-0.5 rounded bg-[var(--color-surface-2)] border border-[var(--color-border)] text-[10px] text-[var(--color-text-secondary)] max-w-[100px] truncate">
+              {example}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const bars = chartType === 'histogram' || chartType === 'trend' ? profile.distribution : profile.top_values;
+  if (!bars || bars.length === 0) {
+    return (
+      <div className="h-24 flex items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/20 text-xs text-[var(--color-text-muted)]">
+        No distribution available
+      </div>
+    );
+  }
+
+  const maxPct = Math.max(...bars.map((bucket) => bucket.pct), 1);
+  return (
+    <div className="space-y-2">
+      <div className="h-24 flex items-end gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/20 p-2 overflow-hidden">
+        {bars.map((bucket) => (
+          <HoverTooltip
+            key={`${profile.name}-${bucket.label}`}
+            content={`${bucket.label}: ${bucket.count.toLocaleString()} records (${bucket.pct}%)`}
+            className="flex-1 h-full"
+          >
+            <div className="w-full h-full min-w-0 flex flex-col items-center justify-end gap-1 cursor-help">
+              <div
+                className="w-full rounded-t-sm bg-[var(--color-accent-primary)]/85 hover:bg-[var(--color-accent-primary)] transition-colors"
+                style={{ height: `${Math.max((bucket.pct / maxPct) * 100, 6)}%` }}
+              />
+            </div>
+          </HoverTooltip>
+        ))}
+      </div>
+      <div className="flex justify-between text-[10px] text-[var(--color-text-muted)] font-mono">
+        <span>{bars[0]?.label || ''}</span>
+        <span>{bars[bars.length - 1]?.label || ''}</span>
+      </div>
+    </div>
+  );
+};
+
+const ProfileCard: React.FC<{ profile: ColumnProfile }> = ({ profile }) => {
+  const Icon = profileIcon(profile.chart_type);
+  return (
+    <div className="panel-border rounded-xl p-4 w-[280px] shrink-0 flex flex-col gap-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <Icon size={14} className="text-[var(--color-accent-primary)] shrink-0" />
+            <h3 className="font-mono text-sm font-bold text-[var(--color-text-primary)] truncate">{profile.title || profile.label}</h3>
+          </div>
+          <p className="text-[11px] text-[var(--color-text-muted)] mt-1 line-clamp-2">{profile.summary}</p>
+        </div>
+        <StatusBadge status="INFO" className="shrink-0">{profile.chart_type}</StatusBadge>
+      </div>
+
+      {renderProfileChart(profile)}
+
+      <div className="grid grid-cols-3 gap-2 text-[10px] font-mono">
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/30 px-2 py-1.5">
+          <div className="text-[var(--color-text-muted)] uppercase tracking-widest">Nulls</div>
+          <div className="text-[var(--color-text-primary)] mt-1">{profile.null_pct}%</div>
+        </div>
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/30 px-2 py-1.5">
+          <div className="text-[var(--color-text-muted)] uppercase tracking-widest">Distinct</div>
+          <div className="text-[var(--color-text-primary)] mt-1">{profile.distinct_count}</div>
+        </div>
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/30 px-2 py-1.5">
+          <div className="text-[var(--color-text-muted)] uppercase tracking-widest">Type</div>
+          <div className="text-[var(--color-text-primary)] mt-1 truncate">{profile.semantic_type}</div>
+        </div>
+      </div>
+
+      <div className="text-[11px] text-[var(--color-text-secondary)] font-mono leading-relaxed">{profile.reason}</div>
+    </div>
+  );
+};
+
 // ─── Detail Panel Content ─────────────────────────────────────────────────────
 
 const VaultRecordDetail: React.FC<{ record: VaultRecord }> = ({ record }) => {
   const prettyJson = JSON.stringify(record.raw_payload, null, 2);
   const validity = validityStats(record.format_validity);
   const quality = correctnessScore(record);
+  const allColumnEntries = Object.entries(record).filter(([key]) => key !== 'raw_payload');
 
   return (
     <div className="space-y-4">
@@ -139,6 +279,22 @@ const VaultRecordDetail: React.FC<{ record: VaultRecord }> = ({ record }) => {
 
       {/* Raw Payload */}
       <div>
+        <h3 className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-3">
+          All Bronze Columns
+        </h3>
+        <div className="panel-border rounded-lg overflow-hidden divide-y divide-[var(--color-border)] mb-4">
+          {allColumnEntries.map(([label, value]) => (
+            <div key={label} className="flex items-start px-3 py-2 gap-3">
+              <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] w-32 shrink-0">
+                {label}
+              </span>
+              <span className="font-mono text-xs text-[var(--color-text-primary)] break-all">
+                {typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value ?? '—')}
+              </span>
+            </div>
+          ))}
+        </div>
+
         <h3 className="font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] mb-3">
           Raw Payload
         </h3>
@@ -242,7 +398,7 @@ export default function RawVaultExplorer() {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-lg font-display font-semibold text-[var(--color-text-primary)]">
+              <h1 className="text-2xl font-display font-semibold text-[var(--color-text-primary)]">
                 Raw Vault
               </h1>
               <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[10px] font-mono font-bold uppercase tracking-wider">
@@ -250,7 +406,7 @@ export default function RawVaultExplorer() {
                 Immutable
               </span>
             </div>
-            <p className="text-xs text-[var(--color-text-muted)] font-mono mt-0.5">
+            <p className="text-sm text-[var(--color-text-muted)] font-mono mt-0.5">
               Immutable Event Store — Bronze Layer
             </p>
           </div>
@@ -259,9 +415,9 @@ export default function RawVaultExplorer() {
         <button
           onClick={handleRefresh}
           disabled={isFetching}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)]/30 transition-all text-xs font-mono"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent-primary)]/30 transition-all text-sm font-mono"
         >
-          <RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />
+          <RefreshCw size={16} className={isFetching ? 'animate-spin' : ''} />
           Refresh
         </button>
       </div>
@@ -269,16 +425,23 @@ export default function RawVaultExplorer() {
       {/* ── Layer Quality KPIs ── */}
       <LayerKPIStats layerName="Raw Vault" layerId={1} />
 
+      {/* ── Column Profile (Bronze) ── */}
+      <ColumnProfileStrip
+        layer="bronze"
+        title="Raw Vault Column Profile"
+        description="Bronze layer profiling and chart suggestions for all raw vault columns."
+      />
+
       {/* ── Search Bar ── */}
       <div className="flex items-center gap-2.5">
         <div className="relative flex-1 max-w-md">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
           <input
             type="text"
             value={search}
             onChange={e => handleSearchChange(e.target.value)}
             placeholder="Search by Customer ID, Source System…"
-            className="w-full pl-9 pr-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-xs font-mono text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent-primary)]/50 transition-colors"
+            className="w-full pl-10 pr-3 py-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-1)] text-sm font-mono text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-accent-primary)]/50 transition-colors"
           />
           {search && (
             <button
@@ -290,7 +453,7 @@ export default function RawVaultExplorer() {
           )}
         </div>
         {total > 0 && (
-          <span className="text-xs font-mono text-[var(--color-text-muted)] whitespace-nowrap">
+          <span className="text-sm font-mono text-[var(--color-text-muted)] whitespace-nowrap">
             {total.toLocaleString()} records
           </span>
         )}
@@ -305,9 +468,17 @@ export default function RawVaultExplorer() {
                 {['Vault ID', 'Customer ID', 'Source', 'Completeness', 'Validity', 'Correctness', 'Invalid', 'DLQ', 'Ingested At', ''].map(col => (
                   <th
                     key={col}
-                    className="px-3 py-2.5 font-mono text-[10px] uppercase tracking-widest text-[var(--color-text-muted)] whitespace-nowrap"
+                    className="px-4 py-3 font-mono text-xs uppercase tracking-widest text-[var(--color-text-muted)] whitespace-nowrap"
                   >
-                    {col}
+                    {col ? (
+                      <HoverTooltip content={HEADER_HELP[col]}>
+                        <span>{col}</span>
+                      </HoverTooltip>
+                    ) : (
+                      <HoverTooltip content="Open row details panel">
+                        <span> </span>
+                      </HoverTooltip>
+                    )}
                   </th>
                 ))}
               </tr>
@@ -329,7 +500,10 @@ export default function RawVaultExplorer() {
                 </tr>
               ) : (
                 <AnimatePresence initial={false}>
-                  {allRecords.map((record, idx) => (
+                  {allRecords.map((record, idx) => {
+                    const validity = validityStats(record.format_validity);
+                    const correctness = correctnessScore(record);
+                    return (
                     <motion.tr
                       key={record.vault_id}
                       initial={{ opacity: 0, y: 4 }}
@@ -338,45 +512,66 @@ export default function RawVaultExplorer() {
                       onClick={() => openPanel(record)}
                       className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-accent-primary)]/4 cursor-pointer transition-colors group"
                     >
-                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-muted)]">
-                        #{record.vault_id}
+                      <td className="px-4 py-3 font-mono text-sm text-[var(--color-text-muted)]">
+                        <HoverTooltip content={`Vault row #${record.vault_id}. Immutable raw ingestion event.`}>
+                          <span>#{record.vault_id}</span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-primary)] font-medium">
-                        {record.cust_id}
+                      <td className="px-4 py-3 font-mono text-sm text-[var(--color-text-primary)] font-medium">
+                        <HoverTooltip content={`Customer ID: ${record.cust_id}. Source system key used for lineage and joins.`}>
+                          <span>{record.cust_id}</span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-[var(--color-accent-primary)]/8 text-[var(--color-accent-primary)] border border-[var(--color-accent-primary)]/20">
-                          {record.source_system}
-                        </span>
+                      <td className="px-4 py-3">
+                        <HoverTooltip content={`Source system: ${record.source_system}`}>
+                          <span className="px-2.5 py-1 rounded text-[11px] font-mono uppercase tracking-wider bg-[var(--color-accent-primary)]/8 text-[var(--color-accent-primary)] border border-[var(--color-accent-primary)]/20">
+                            {record.source_system}
+                          </span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)] tabular-nums">
-                        {Math.round(record.raw_completeness ?? 0)}%
+                      <td className="px-4 py-3 font-mono text-sm text-[var(--color-text-secondary)] tabular-nums">
+                        <HoverTooltip content={`Completeness: ${Math.round(record.raw_completeness ?? 0)}%. Higher means more required raw fields were present.`}>
+                          <span>{Math.round(record.raw_completeness ?? 0)}%</span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)] tabular-nums">
-                        {validityStats(record.format_validity).pct}%
+                      <td className="px-4 py-3 font-mono text-sm text-[var(--color-text-secondary)] tabular-nums">
+                        <HoverTooltip content={`Validity: ${validity.pct}% (${validity.valid}/${validity.total || 0} fields valid). Invalid fields: ${validity.invalid}.`}>
+                          <span>{validity.pct}%</span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
-                        <span className={correctnessScore(record) >= 85 ? 'text-emerald-600 dark:text-emerald-300' : correctnessScore(record) >= 65 ? 'text-amber-600 dark:text-amber-300' : 'text-rose-600 dark:text-rose-300'}>
-                          {correctnessScore(record)}%
-                        </span>
+                      <td className="px-4 py-3 font-mono text-sm tabular-nums">
+                        <HoverTooltip content={correctnessBreakdown(record)}>
+                          <span className={correctness >= 85 ? 'text-emerald-600 dark:text-emerald-300' : correctness >= 65 ? 'text-amber-600 dark:text-amber-300' : 'text-rose-600 dark:text-rose-300'}>
+                            {correctness}%
+                          </span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)] tabular-nums">
-                        {validityStats(record.format_validity).invalid}
+                      <td className="px-4 py-3 font-mono text-sm text-[var(--color-text-secondary)] tabular-nums">
+                        <HoverTooltip content={`Invalid fields count: ${validity.invalid}. Total validated fields: ${validity.total || 0}.`}>
+                          <span>{validity.invalid}</span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)]">
-                        {record.dlq_flag ? 'Y' : 'N'}
+                      <td className="px-4 py-3 font-mono text-sm text-[var(--color-text-secondary)]">
+                        <HoverTooltip content={record.dlq_flag ? `DLQ: Yes${record.dlq_reason ? ` (${record.dlq_reason})` : ''}` : 'DLQ: No ingestion issue flagged.'}>
+                          <span>{record.dlq_flag ? 'Y' : 'N'}</span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-secondary)] whitespace-nowrap">
-                        {formatDateShort(record.ingested_at)}
+                      <td className="px-4 py-3 font-mono text-sm text-[var(--color-text-secondary)] whitespace-nowrap">
+                        <HoverTooltip content={`Ingested at: ${formatDate(record.ingested_at)}`}>
+                          <span>{formatDateShort(record.ingested_at)}</span>
+                        </HoverTooltip>
                       </td>
-                      <td className="px-3 py-2.5">
-                        <span className="inline-flex items-center gap-1 text-xs font-mono text-[var(--color-text-muted)] group-hover:text-[var(--color-accent-primary)] transition-colors">
-                          View
-                          <ChevronRight size={13} />
-                        </span>
+                      <td className="px-4 py-3">
+                        <HoverTooltip content="Open full raw payload, metadata, and quality details for this row">
+                          <span className="inline-flex items-center gap-1 text-sm font-mono text-[var(--color-text-muted)] group-hover:text-[var(--color-accent-primary)] transition-colors">
+                            View
+                            <ChevronRight size={14} />
+                          </span>
+                        </HoverTooltip>
                       </td>
                     </motion.tr>
-                  ))}
+                    );
+                  })}
                 </AnimatePresence>
               )}
 

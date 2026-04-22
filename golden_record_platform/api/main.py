@@ -11,6 +11,7 @@ import os
 import sys
 import uuid
 import socket
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Optional
 
@@ -34,6 +35,7 @@ from golden_record_platform.utils.ai_prompts import (
     DATA_QUALITY_SYSTEM_PROMPT,
     EXPLAIN_MERGE_SYSTEM_PROMPT,
     CHAT_SYSTEM_PROMPT,
+    COLUMN_PROFILE_SYSTEM_PROMPT,
 )
 from golden_record_platform.utils.realtime import live_event_hub
 from golden_record_platform.utils.score_utils import normalize_json_list, to_percent
@@ -267,6 +269,354 @@ def _gold_record(row: dict) -> dict:
         "updated_at": row.get("updated_at") or datetime.utcnow().isoformat(),
         "llm_summary": row.get("llm_summary") or "",
     }
+
+
+def _humanize_column_name(name: str) -> str:
+    return name.replace("_", " ").strip().title()
+
+
+def _is_blank(value: Any) -> bool:
+    return value is None or value == "" or value == "-"
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_datetime_value(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for candidate in (text, text.replace("Z", "+00:00")):
+        try:
+            return datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _is_boolish_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return True
+    text = str(value).strip().lower()
+    return text in {"0", "1", "true", "false", "y", "n", "yes", "no", "t", "f"}
+
+
+def _guess_semantic_type(column_name: str, sqlite_type: str | None, values: list[Any]) -> str:
+    lower_name = column_name.lower()
+    non_blank = [value for value in values if not _is_blank(value)]
+    if not non_blank:
+        return "text"
+
+    if any(token in lower_name for token in ["id", "_id", "uuid", "key", "cust_id", "golden_id", "silver_id", "bronze_id"]):
+        return "identifier"
+    if any(token in lower_name for token in ["date", "dob", "birth", "timestamp", "time", "_at", "year", "month", "decade"]):
+        return "date"
+
+    boolish_ratio = sum(1 for value in non_blank if _is_boolish_value(value)) / len(non_blank)
+    if boolish_ratio >= 0.8:
+        return "boolean"
+
+    numeric_ratio = sum(1 for value in non_blank if _as_float(value) is not None) / len(non_blank)
+    if numeric_ratio >= 0.75:
+        return "numeric"
+
+    date_ratio = sum(1 for value in non_blank if _parse_datetime_value(value) is not None) / len(non_blank)
+    if date_ratio >= 0.6:
+        return "date"
+
+    distinct_ratio = len({str(value).strip().lower() for value in non_blank}) / len(non_blank)
+    if distinct_ratio <= 0.2:
+        return "categorical"
+
+    if sqlite_type and any(token in sqlite_type.lower() for token in ["int", "real", "numeric", "decimal", "float"]):
+        return "numeric"
+
+    return "text"
+
+
+def _bucket_numeric(values: list[float], bucket_count: int = 8) -> list[dict[str, Any]]:
+    if not values:
+        return []
+    min_value = min(values)
+    max_value = max(values)
+    if min_value == max_value:
+        return [{"label": str(round(min_value, 2)), "count": len(values), "pct": 100.0}]
+
+    span = max_value - min_value
+    step = span / bucket_count if span else 1
+    counts = [0 for _ in range(bucket_count)]
+    for value in values:
+        index = min(bucket_count - 1, int((value - min_value) / step))
+        counts[index] += 1
+
+    total = len(values)
+    buckets: list[dict[str, Any]] = []
+    for index, count in enumerate(counts):
+        start = min_value + (step * index)
+        end = start + step
+        buckets.append({
+            "label": f"{start:.0f}-{end:.0f}" if span > 1 else f"{start:.2f}",
+            "count": count,
+            "pct": round(count / total * 100.0, 1) if total else 0.0,
+        })
+    return buckets
+
+
+def _bucket_dates(values: list[datetime], bucket_count: int = 8) -> list[dict[str, Any]]:
+    if not values:
+        return []
+    years = [value.year for value in values]
+    min_year = min(years)
+    max_year = max(years)
+    if min_year == max_year:
+        count = len(years)
+        return [{"label": str(min_year), "count": count, "pct": 100.0}]
+
+    span = max_year - min_year + 1
+    bucket_size = max(1, round(span / bucket_count))
+    buckets_map: dict[tuple[int, int], int] = {}
+    for year in years:
+        start = min_year + ((year - min_year) // bucket_size) * bucket_size
+        end = start + bucket_size - 1
+        buckets_map[(start, end)] = buckets_map.get((start, end), 0) + 1
+
+    total = len(years)
+    buckets: list[dict[str, Any]] = []
+    for (start, end), count in sorted(buckets_map.items()):
+        buckets.append({
+            "label": f"{start}-{end}" if start != end else str(start),
+            "count": count,
+            "pct": round(count / total * 100.0, 1) if total else 0.0,
+        })
+    return buckets
+
+
+def _top_values(values: list[Any], limit: int = 5) -> list[dict[str, Any]]:
+    counts = Counter(str(value).strip() for value in values if not _is_blank(value))
+    total = sum(counts.values()) or 1
+    return [
+        {"label": label, "count": count, "pct": round(count / total * 100.0, 1)}
+        for label, count in counts.most_common(limit)
+    ]
+
+
+def _resolve_profile_chart(semantic_type: str, distinct_count: int, row_count: int) -> str:
+    if semantic_type in {"numeric", "date"}:
+        return "histogram"
+    if semantic_type == "boolean":
+        return "donut"
+    if semantic_type == "categorical":
+        return "bar"
+    if semantic_type == "identifier":
+        return "stat"
+    if row_count and distinct_count / row_count <= 0.2:
+        return "bar"
+    return "stat"
+
+
+def _build_column_profile(
+    table_name: str,
+    column_meta: dict[str, Any],
+    rows: list[dict[str, Any]],
+    row_count: int,
+    non_null_count: int,
+    distinct_count: int,
+) -> dict[str, Any]:
+    name = column_meta.get("name")
+    sqlite_type = column_meta.get("type") or ""
+    raw_values = [row.get(name) for row in rows]
+    non_blank_values = [value for value in raw_values if not _is_blank(value)]
+    null_count = max(row_count - non_null_count, 0)
+    null_pct = round((null_count / row_count) * 100.0, 1) if row_count else 0.0
+    coverage_pct = round((non_null_count / row_count) * 100.0, 1) if row_count else 0.0
+    semantic_type = _guess_semantic_type(name, sqlite_type, raw_values)
+    chart_type = _resolve_profile_chart(semantic_type, distinct_count, row_count)
+
+    profile: dict[str, Any] = {
+        "name": name,
+        "label": _humanize_column_name(name),
+        "sqlite_type": sqlite_type,
+        "semantic_type": semantic_type,
+        "chart_type": chart_type,
+        "summary": f"{_humanize_column_name(name)} column",
+        "reason": "",
+        "null_count": null_count,
+        "null_pct": null_pct,
+        "distinct_count": distinct_count,
+        "coverage_pct": coverage_pct,
+        "examples": [str(value) for value in non_blank_values[:4]],
+        "distribution": [],
+        "top_values": [],
+        "min": None,
+        "max": None,
+        "mean": None,
+    }
+
+    if semantic_type == "numeric":
+        numeric_values = [_as_float(value) for value in non_blank_values]
+        numeric_values = [value for value in numeric_values if value is not None]
+        if numeric_values:
+            profile["min"] = round(min(numeric_values), 2)
+            profile["max"] = round(max(numeric_values), 2)
+            profile["mean"] = round(sum(numeric_values) / len(numeric_values), 2)
+            profile["distribution"] = _bucket_numeric(numeric_values)
+    elif semantic_type == "date":
+        parsed_dates = [_parse_datetime_value(value) for value in non_blank_values]
+        parsed_dates = [value for value in parsed_dates if value is not None]
+        if parsed_dates:
+            profile["min"] = min(parsed_dates).date().isoformat()
+            profile["max"] = max(parsed_dates).date().isoformat()
+            profile["distribution"] = _bucket_dates(parsed_dates)
+    elif semantic_type in {"categorical", "boolean"}:
+        profile["top_values"] = _top_values(non_blank_values, limit=6)
+    else:
+        profile["top_values"] = _top_values(non_blank_values, limit=5)
+
+    if semantic_type == "identifier":
+        profile["reason"] = "High-cardinality identifier column; show as a stat with examples instead of a chart."
+        profile["summary"] = f"{distinct_count} unique values across {row_count} rows"
+    elif semantic_type == "numeric":
+        profile["reason"] = "Numeric spread is best shown with a histogram to reveal concentration and outliers."
+        profile["summary"] = f"Range {profile['min']} to {profile['max']}"
+    elif semantic_type == "date":
+        profile["reason"] = "Date values are best shown with a histogram over years to reveal recency and spread."
+        profile["summary"] = f"Dates span {profile['min']} to {profile['max']}"
+    elif semantic_type == "boolean":
+        profile["reason"] = "Binary columns are easiest to read as proportional categories."
+        profile["summary"] = "Boolean distribution"
+    elif semantic_type == "categorical":
+        profile["reason"] = "Low-cardinality categories should be shown as ranked bars."
+        profile["summary"] = f"{distinct_count} categories"
+    else:
+        profile["reason"] = "High-cardinality text is better summarized as stats and examples."
+        profile["summary"] = f"{distinct_count} distinct text values"
+
+    return profile
+
+
+def _fetch_column_stats(db: Any, table_name: str, column_name: str) -> dict[str, int]:
+    stats = db.fetch_one(
+        f'SELECT COUNT(*) AS total, COUNT("{column_name}") AS non_null, COUNT(DISTINCT "{column_name}") AS distinct_count FROM {table_name}'
+    ) or {}
+    return {
+        "total": int(stats.get("total") or 0),
+        "non_null": int(stats.get("non_null") or 0),
+        "distinct_count": int(stats.get("distinct_count") or 0),
+    }
+
+
+def _load_cached_profiles(db: Any, table_name: str, row_count: int, column_names: list[str]) -> list[dict[str, Any]] | None:
+    cached_rows = db.fetch_all(
+        """
+        SELECT column_name, row_count, profile_json
+        FROM column_profiles
+        WHERE table_name = ?
+        ORDER BY column_name
+        """,
+        [table_name],
+    )
+    if len(cached_rows) != len(column_names):
+        return None
+
+    cached_map: dict[str, dict[str, Any]] = {}
+    for row in cached_rows:
+        try:
+            profile = json.loads(row.get("profile_json") or "{}")
+        except json.JSONDecodeError:
+            return None
+        if int(row.get("row_count") or 0) != row_count:
+            return None
+        column_name = row.get("column_name")
+        if not column_name:
+            return None
+        cached_map[column_name] = profile
+
+    if set(cached_map) != set(column_names):
+        return None
+
+    return [cached_map[column_name] for column_name in column_names if column_name in cached_map]
+
+
+def _store_profiles_cache(db: Any, layer: str, table_name: str, row_count: int, profiles: list[dict[str, Any]]) -> None:
+    db.execute_query(
+        "DELETE FROM column_profiles WHERE layer = ? AND table_name = ?",
+        [layer, table_name],
+    )
+    for profile in profiles:
+        db.insert_record(
+            "column_profiles",
+            {
+                "layer": layer,
+                "table_name": table_name,
+                "column_name": profile["name"],
+                "row_count": row_count,
+                "profile_json": profile,
+            },
+        )
+
+
+async def _enrich_profiles_with_ai(table_name: str, row_count: int, profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not is_ai_configured():
+        return profiles
+
+    try:
+        payload = {
+            "table_name": table_name,
+            "row_count": row_count,
+            "columns": [
+                {
+                    "name": profile["name"],
+                    "label": profile["label"],
+                    "sqlite_type": profile["sqlite_type"],
+                    "semantic_type": profile["semantic_type"],
+                    "distinct_count": profile["distinct_count"],
+                    "null_pct": profile["null_pct"],
+                    "coverage_pct": profile["coverage_pct"],
+                    "summary": profile["summary"],
+                    "examples": profile["examples"],
+                    "distribution": profile["distribution"],
+                    "top_values": profile["top_values"],
+                }
+                for profile in profiles
+            ],
+        }
+        ai_result = await call_gpt4_json(COLUMN_PROFILE_SYSTEM_PROMPT, json.dumps(payload), max_tokens=1600)
+        ai_columns = ai_result.get("columns") if isinstance(ai_result, dict) else None
+        if not isinstance(ai_columns, list):
+            return profiles
+
+        ai_map = {item.get("name"): item for item in ai_columns if isinstance(item, dict) and item.get("name")}
+        merged: list[dict[str, Any]] = []
+        for profile in profiles:
+            ai_profile = ai_map.get(profile["name"], {})
+            chart_type = (ai_profile.get("chart_type") or profile["chart_type"]).lower()
+            if chart_type not in {"histogram", "bar", "donut", "trend", "stat"}:
+                chart_type = profile["chart_type"]
+            merged.append({
+                **profile,
+                "chart_type": chart_type,
+                "semantic_type": ai_profile.get("semantic_type") or profile["semantic_type"],
+                "title": ai_profile.get("title") or profile["label"],
+                "summary": ai_profile.get("summary") or profile["summary"],
+                "reason": ai_profile.get("reason") or profile["reason"],
+                "show_graph": bool(ai_profile.get("show_graph", chart_type != "stat")),
+                "priority": ai_profile.get("priority", 0),
+            })
+        return merged
+    except Exception as exc:
+        logger.warning("AI column profiling failed for %s: %s", table_name, exc)
+        return profiles
 
 
 def _fetch_match_rows(
@@ -596,34 +946,34 @@ async def get_quality_progression():
         )
 
         raw_presence_avg = (
-            (raw_presence_row["first_ok"] if raw_presence_row else 0.0)
-            + (raw_presence_row["last_ok"] if raw_presence_row else 0.0)
-            + (raw_presence_row["email_ok"] if raw_presence_row else 0.0)
-            + (raw_presence_row["phone_ok"] if raw_presence_row else 0.0)
-            + (raw_presence_row["birth_ok"] if raw_presence_row else 0.0)
-            + (raw_presence_row["city_ok"] if raw_presence_row else 0.0)
-            + (raw_presence_row["state_ok"] if raw_presence_row else 0.0)
+            ((raw_presence_row["first_ok"] or 0.0) if raw_presence_row else 0.0)
+            + ((raw_presence_row["last_ok"] or 0.0) if raw_presence_row else 0.0)
+            + ((raw_presence_row["email_ok"] or 0.0) if raw_presence_row else 0.0)
+            + ((raw_presence_row["phone_ok"] or 0.0) if raw_presence_row else 0.0)
+            + ((raw_presence_row["birth_ok"] or 0.0) if raw_presence_row else 0.0)
+            + ((raw_presence_row["city_ok"] or 0.0) if raw_presence_row else 0.0)
+            + ((raw_presence_row["state_ok"] or 0.0) if raw_presence_row else 0.0)
         ) / 7.0
 
         raw_format_avg = (
-            (raw_consistency_row["email_fmt"] if raw_consistency_row else 0.0)
-            + (raw_consistency_row["phone_fmt"] if raw_consistency_row else 0.0)
-            + (raw_consistency_row["state_fmt"] if raw_consistency_row else 0.0)
+            ((raw_consistency_row["email_fmt"] or 0.0) if raw_consistency_row else 0.0)
+            + ((raw_consistency_row["phone_fmt"] or 0.0) if raw_consistency_row else 0.0)
+            + ((raw_consistency_row["state_fmt"] or 0.0) if raw_consistency_row else 0.0)
         ) / 3.0
 
-        canonical_email_valid = canonical_quality_row["email_valid_pct"] if canonical_quality_row else 0.0
-        canonical_phone_valid = canonical_quality_row["phone_valid_pct"] if canonical_quality_row else 0.0
+        canonical_email_valid = (canonical_quality_row["email_valid_pct"] or 0.0) if canonical_quality_row else 0.0
+        canonical_phone_valid = (canonical_quality_row["phone_valid_pct"] or 0.0) if canonical_quality_row else 0.0
 
-        identity_avg_conf = identity_quality_row["avg_conf"] if identity_quality_row else 0.0
-        identity_resolved = identity_quality_row["resolved_pct"] if identity_quality_row else 0.0
+        identity_avg_conf = (identity_quality_row["avg_conf"] or 0.0) if identity_quality_row else 0.0
+        identity_resolved = (identity_quality_row["resolved_pct"] or 0.0) if identity_quality_row else 0.0
 
         master_presence_avg = (
-            (master_quality_row["name_ok"] if master_quality_row else 0.0)
-            + (master_quality_row["email_ok"] if master_quality_row else 0.0)
-            + (master_quality_row["phone_ok"] if master_quality_row else 0.0)
-            + (master_quality_row["birth_ok"] if master_quality_row else 0.0)
+            ((master_quality_row["name_ok"] or 0.0) if master_quality_row else 0.0)
+            + ((master_quality_row["email_ok"] or 0.0) if master_quality_row else 0.0)
+            + ((master_quality_row["phone_ok"] or 0.0) if master_quality_row else 0.0)
+            + ((master_quality_row["birth_ok"] or 0.0) if master_quality_row else 0.0)
         ) / 4.0
-        master_merge_conf = master_quality_row["merge_conf"] if master_quality_row else 0.0
+        master_merge_conf = (master_quality_row["merge_conf"] or 0.0) if master_quality_row else 0.0
 
         # Stage-specific KPI formulas are intentionally strict in early stages
         # and weighted toward trust in later stages, so scores improve by layer.
@@ -1540,7 +1890,20 @@ async def master_records(
         total = total_row["total"] if total_row else 0
 
         rows = db.fetch_all(
-            f"SELECT * FROM gold_customer {where_filtered} ORDER BY merged_at DESC LIMIT ? OFFSET ?",
+            f"""
+            SELECT *
+            FROM gold_customer
+            {where_filtered}
+            ORDER BY
+                CASE
+                    WHEN source_ids IS NULL OR TRIM(source_ids) = '' THEN 1
+                    WHEN json_valid(source_ids) THEN COALESCE(json_array_length(source_ids), 1)
+                    ELSE 1 + (LENGTH(source_ids) - LENGTH(REPLACE(source_ids, ',', '')))
+                END DESC,
+                COALESCE(merge_confidence, 0) DESC,
+                merged_at DESC
+            LIMIT ? OFFSET ?
+            """,
             filter_params + [limit, offset],
         )
 
@@ -1581,6 +1944,105 @@ async def master_record_detail(master_id: str):
         if not row:
             raise HTTPException(status_code=404, detail="Master record not found")
         return _gold_record(dict(row))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/master/records/{master_id}/detail")
+async def master_record_full_detail(master_id: str):
+    try:
+        db = get_db()
+        row = db.fetch_one("SELECT * FROM gold_customer WHERE golden_id = ?", [master_id])
+        if not row:
+            raise HTTPException(status_code=404, detail="Master record not found")
+
+        gold_row = dict(row)
+        source_ids = _to_list(gold_row.get("source_ids"))
+
+        source_records: list[dict[str, Any]] = []
+        silver_ids: list[int] = []
+
+        for cust_id in source_ids:
+            source = db.fetch_one(
+                "SELECT * FROM db2_customer_simulated WHERE cust_id = ?",
+                [cust_id],
+            )
+            vault = db.fetch_one(
+                "SELECT * FROM bronze_customer WHERE cust_id = ? ORDER BY ingested_at DESC LIMIT 1",
+                [cust_id],
+            )
+            canonical = db.fetch_one(
+                "SELECT * FROM silver_customer WHERE cust_id = ? ORDER BY cleaned_at DESC LIMIT 1",
+                [cust_id],
+            )
+
+            if canonical and canonical.get("silver_id") is not None:
+                try:
+                    silver_ids.append(int(canonical.get("silver_id")))
+                except (TypeError, ValueError):
+                    pass
+
+            source_records.append({
+                "cust_id": cust_id,
+                "source_system": (source or {}).get("source_system")
+                or (vault or {}).get("source_system")
+                or (canonical or {}).get("source_system"),
+                "source": dict(source) if source else None,
+                "vault": dict(vault) if vault else None,
+                "canonical": dict(canonical) if canonical else None,
+            })
+
+        match_records: list[dict[str, Any]] = []
+        if silver_ids:
+            placeholders = ",".join(["?"] * len(silver_ids))
+            match_rows = db.fetch_all(
+                f"""
+                SELECT
+                    dm.match_id,
+                    dm.silver_id_a,
+                    dm.silver_id_b,
+                    dm.email_match,
+                    dm.phone_match,
+                    dm.name_similarity,
+                    dm.dob_match,
+                    dm.city_similarity,
+                    dm.address_similarity,
+                    dm.final_score,
+                    dm.ai_score,
+                    dm.decision,
+                    dm.created_at,
+                    s1.cust_id AS source_a_cust_id,
+                    s2.cust_id AS source_b_cust_id
+                FROM duplicate_matches dm
+                LEFT JOIN silver_customer s1 ON s1.silver_id = dm.silver_id_a
+                LEFT JOIN silver_customer s2 ON s2.silver_id = dm.silver_id_b
+                WHERE dm.silver_id_a IN ({placeholders}) OR dm.silver_id_b IN ({placeholders})
+                ORDER BY COALESCE(dm.final_score, dm.ai_score, 0) DESC, dm.created_at DESC
+                LIMIT 50
+                """,
+                silver_ids + silver_ids,
+            )
+            match_records = [dict(r) for r in match_rows]
+
+        corrections_rows = db.fetch_all(
+            """
+            SELECT id, master_id, field_name, old_value, new_value, applied_by, applied_at, confidence
+            FROM correction_history
+            WHERE master_id = ?
+            ORDER BY applied_at DESC
+            LIMIT 50
+            """,
+            [master_id],
+        )
+
+        return {
+            "master": _gold_record(gold_row),
+            "source_records": source_records,
+            "match_records": match_records,
+            "corrections": [dict(r) for r in corrections_rows],
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -2249,6 +2711,64 @@ async def get_silver_records(limit: int = Query(100, ge=1, le=10000)):
 async def get_golden_records(limit: int = Query(100, ge=1, le=10000)):
     result = await master_records(limit=limit, offset=0, search="")
     return {"records": result["records"], "count": result["count"]}
+
+
+@app.get("/records/{layer}/profile")
+async def get_records_profile(
+    layer: str,
+    sample_size: int = Query(300, ge=50, le=5000),
+):
+    try:
+        db = get_db()
+        table_map = {
+            "db2": "db2_customer_simulated",
+            "bronze": "bronze_customer",
+            "silver": "silver_customer",
+            "gold": "gold_customer",
+        }
+        table_name = table_map.get(layer)
+        if not table_name:
+            raise HTTPException(status_code=404, detail="Unknown layer")
+
+        total_row = db.fetch_one(f"SELECT COUNT(*) AS total FROM {table_name}")
+        row_count = int(total_row["total"] if total_row else 0)
+        sample_rows = db.fetch_all(f"SELECT * FROM {table_name} LIMIT ?", [sample_size])
+        column_info = db.fetch_all(f"PRAGMA table_info({table_name})")
+        column_names = [column["name"] for column in column_info if column.get("name")]
+
+        profiles = _load_cached_profiles(db, table_name, row_count, column_names)
+        cache_hit = profiles is not None
+
+        if profiles is None:
+            profiles = [
+                _build_column_profile(
+                    table_name,
+                    column,
+                    sample_rows,
+                    row_count,
+                    stats["non_null"],
+                    stats["distinct_count"],
+                )
+                for column in column_info
+                for stats in [_fetch_column_stats(db, table_name, column["name"])]
+            ]
+            profiles = await _enrich_profiles_with_ai(table_name, row_count, profiles)
+            _store_profiles_cache(db, layer, table_name, row_count, profiles)
+
+        return {
+            "layer": layer,
+            "table_name": table_name,
+            "row_count": row_count,
+            "sample_size": len(sample_rows),
+            "generated_at": datetime.utcnow().isoformat(),
+            "ai_used": is_ai_configured(),
+            "from_cache": cache_hit,
+            "columns": profiles,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/matches")

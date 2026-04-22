@@ -74,6 +74,18 @@ CREATE TABLE IF NOT EXISTS kafka_offsets (
     PRIMARY KEY (topic, partition)
 );
 
+-- Cached Column Profiles
+CREATE TABLE IF NOT EXISTS column_profiles (
+    profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    layer TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    row_count INTEGER NOT NULL,
+    profile_json TEXT NOT NULL,
+    generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(layer, table_name, column_name)
+);
+
 -- Sample data in simulated DB2
 INSERT INTO db2_customer_simulated (fname, lname, phone, address) VALUES
 ('Krish', 'R', '9876543210', 'Bangalore'),
